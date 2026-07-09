@@ -1,0 +1,10 @@
+[project]
+name = "ledger-l5"
+version = "0.1.0"
+description = "Billing and usage-metering service for Sentinel-L7"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.139.0",
+    "pydantic>=2",
+    "uvicorn[standard]>=0.51.0",
+]

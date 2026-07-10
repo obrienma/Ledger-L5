@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}Ledger-L5{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+    nav a { margin-right: 1rem; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+    th, td { text-align: left; padding: 0.4rem 0.8rem; border-bottom: 1px solid #ddd; }
+    .error { color: #b00020; }
+    form.inline { display: inline; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/dashboard/invoices">Invoices</a>
+    <a href="/dashboard/usage-events">Usage Events</a>
+    <a href="/dashboard/generate-invoice">Generate Invoice</a>
+    <a href="/logout">Logout</a>
+  </nav>
+  <hr>
+  {% block content %}{% endblock %}
+</body>
+</html>

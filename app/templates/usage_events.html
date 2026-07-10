@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Usage Events — Ledger-L5{% endblock %}
+{% block content %}
+<h1>Usage Events</h1>
+<form method="get" action="/dashboard/usage-events">
+  <label>From <input type="date" name="period_start" value="{{ period_start or '' }}"></label>
+  <label>To <input type="date" name="period_end" value="{{ period_end or '' }}"></label>
+  <label>Status
+    <select name="billing_status">
+      <option value="" {% if not billing_status %}selected{% endif %}>Any</option>
+      <option value="billable" {% if billing_status == 'billable' %}selected{% endif %}>billable</option>
+      <option value="savings" {% if billing_status == 'savings' %}selected{% endif %}>savings</option>
+      <option value="excluded" {% if billing_status == 'excluded' %}selected{% endif %}>excluded</option>
+    </select>
+  </label>
+  <button type="submit">Filter</button>
+</form>
+<p>Not filterable by customer — <code>usage_events</code> has no <code>customer_id</code> (documented gap, see README).</p>
+<table>
+  <thead>
+    <tr><th>Occurred</th><th>Product</th><th>Metric</th><th>Quantity</th><th>Status</th><th>External ID</th></tr>
+  </thead>
+  <tbody>
+    {% for event in events %}
+    <tr>
+      <td>{{ event.occurred_at }}</td>
+      <td>{{ event.product }}</td>
+      <td>{{ event.metric }}</td>
+      <td>{{ event.quantity }}</td>
+      <td>{{ event.billing_status }}</td>
+      <td>{{ event.external_id }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No usage events match this filter.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

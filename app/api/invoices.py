@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import require_operator_json
 from app.db import get_session
 from app.models import Customer, InvoiceLineItem
 from app.services.billing import (
@@ -16,7 +17,7 @@ from app.services.billing import (
 )
 from app.services.usage_ingestion import METRIC_AI_CALL, PRODUCT
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_operator_json)])
 
 
 class GenerateInvoiceRequest(BaseModel):

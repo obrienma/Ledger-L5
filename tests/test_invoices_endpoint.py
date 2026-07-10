@@ -2,12 +2,14 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from app.config import settings
 from app.models import RateCard, UsageEvent
 from app.services.billing import previous_month_period
 from tests.factories import CustomerFactory
 
 PRODUCT = "sentinel-l7"
 METRIC = "ai_call"
+AUTH_HEADERS = {"Authorization": f"Bearer {settings.operator_api_token}"}
 
 
 def _rate_card(customer_id, unit_rate: Decimal) -> RateCard:
@@ -51,6 +53,7 @@ def test_generate_invoice_with_custom_date_range(client, db_session):
 
     response = client.post(
         "/invoices",
+        headers=AUTH_HEADERS,
         json={
             "customer_id": str(customer.id),
             "period_start": "2026-03-01T00:00:00Z",
@@ -82,7 +85,9 @@ def test_generate_invoice_defaults_to_previous_calendar_month(client, db_session
     db_session.add(_usage_event("transactions:txn-default", quantity=2, occurred_at=midpoint))
     db_session.flush()
 
-    response = client.post("/invoices", json={"customer_id": str(customer.id)})
+    response = client.post(
+        "/invoices", headers=AUTH_HEADERS, json={"customer_id": str(customer.id)}
+    )
 
     assert response.status_code == 201
     body = response.json()
@@ -102,6 +107,7 @@ def test_generate_invoice_defaults_to_previous_calendar_month(client, db_session
 def test_generate_invoice_404s_for_unknown_customer(client):
     response = client.post(
         "/invoices",
+        headers=AUTH_HEADERS,
         json={
             "customer_id": str(uuid.uuid4()),
             "period_start": "2026-03-01T00:00:00Z",
@@ -118,6 +124,7 @@ def test_generate_invoice_422s_when_no_rate_card_applies(client, db_session):
 
     response = client.post(
         "/invoices",
+        headers=AUTH_HEADERS,
         json={
             "customer_id": str(customer.id),
             "period_start": "2026-03-01T00:00:00Z",
@@ -126,3 +133,19 @@ def test_generate_invoice_422s_when_no_rate_card_applies(client, db_session):
     )
 
     assert response.status_code == 422
+
+
+def test_generate_invoice_401s_with_no_token(client):
+    response = client.post("/invoices", json={"customer_id": str(uuid.uuid4())})
+
+    assert response.status_code == 401
+
+
+def test_generate_invoice_401s_with_wrong_token(client):
+    response = client.post(
+        "/invoices",
+        headers={"Authorization": "Bearer wrong-token"},
+        json={"customer_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 401

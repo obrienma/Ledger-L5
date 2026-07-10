@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Invoice {{ invoice.id }} — Ledger-L5{% endblock %}
+{% block content %}
+<h1>Invoice {{ invoice.id }}</h1>
+<p>
+  Customer: {{ invoice.customer_id }}<br>
+  Status: {{ invoice.status }}<br>
+  Period: {{ invoice.period_start }} &ndash; {{ invoice.period_end }}<br>
+  {% if invoice.issued_at %}Issued: {{ invoice.issued_at }}<br>{% endif %}
+</p>
+<table>
+  <thead>
+    <tr><th>Product</th><th>Metric</th><th>Quantity</th><th>Unit rate</th><th>Line total</th></tr>
+  </thead>
+  <tbody>
+    {% for li in line_items %}
+    <tr>
+      <td>{{ li.product }}</td>
+      <td>{{ li.metric }}</td>
+      <td>{{ li.quantity }}</td>
+      <td>{{ li.unit_rate }}</td>
+      <td>{{ li.line_total }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">No line items — zero billable usage for this period.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p><a href="/dashboard/invoices">&larr; Back to invoices</a></p>
+{% endblock %}

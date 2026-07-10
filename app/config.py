@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     poll_interval_seconds: int = 60
     billing_customer_id: uuid.UUID | None = None
     enable_scheduler: bool = True
+    operator_api_token: str
+    session_secret_key: str
 
 
 settings = Settings()

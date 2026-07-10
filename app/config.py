@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str
+    sentinel_l7_base_url: str = "http://localhost:8001"
 
 
 settings = Settings()

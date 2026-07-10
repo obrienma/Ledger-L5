@@ -3,10 +3,10 @@
 {% block content %}
 <h1>Invoice {{ invoice.id }}</h1>
 <p>
-  Customer: {{ invoice.customer_id }}<br>
+  Customer: {{ invoice.customer.name }}<br>
   Status: {{ invoice.status }}<br>
-  Period: {{ invoice.period_start }} &ndash; {{ invoice.period_end }}<br>
-  {% if invoice.issued_at %}Issued: {{ invoice.issued_at }}<br>{% endif %}
+  Period: {{ invoice.period_start | datetimeformat("%Y-%m-%d") }} &ndash; {{ invoice.period_end | datetimeformat("%Y-%m-%d") }}<br>
+  {% if invoice.issued_at %}Issued: {{ invoice.issued_at | datetimeformat }}<br>{% endif %}
 </p>
 <table>
   <thead>

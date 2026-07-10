@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.auth import require_operator_browser
 from app.db import get_session
@@ -36,7 +36,11 @@ def _as_utc(value: date | datetime | None) -> datetime | None:
 
 @router.get("/invoices")
 def list_invoices(request: Request, session: Session = Depends(get_session)):
-    invoices = session.scalars(select(Invoice).order_by(Invoice.created_at.desc())).all()
+    invoices = session.scalars(
+        select(Invoice)
+        .options(joinedload(Invoice.customer))
+        .order_by(Invoice.created_at.desc())
+    ).all()
     return templates.TemplateResponse(request, "invoices.html", {"invoices": invoices})
 
 

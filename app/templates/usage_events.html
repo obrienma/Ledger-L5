@@ -23,7 +23,7 @@
   <tbody>
     {% for event in events %}
     <tr>
-      <td>{{ event.occurred_at }}</td>
+      <td>{{ event.occurred_at | datetimeformat }}</td>
       <td>{{ event.product }}</td>
       <td>{{ event.metric }}</td>
       <td>{{ event.quantity }}</td>

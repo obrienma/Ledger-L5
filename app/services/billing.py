@@ -16,6 +16,18 @@ class InvalidStatusTransitionError(ValueError):
     pass
 
 
+def previous_month_period(now: datetime) -> tuple[datetime, datetime]:
+    """UTC calendar-month boundaries for the month before `now` — shared by the
+    scheduled monthly invoice job and the manual /invoices endpoint's default,
+    so the two can't drift on what "last month" means."""
+    period_end = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if period_end.month == 1:
+        period_start = period_end.replace(year=period_end.year - 1, month=12)
+    else:
+        period_start = period_end.replace(month=period_end.month - 1)
+    return period_start, period_end
+
+
 def get_applicable_rate(
     session: Session,
     customer_id,

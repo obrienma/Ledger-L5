@@ -2,18 +2,19 @@
 
 Ledger-L5 is a **billing and usage-metering service** for Sentinel-L7. It pulls usage events on a schedule, tracks per-customer entitlements, and issues invoices — a service-to-service backend with no operator UI (yet).
 
-Architecturally, this project is being built ADR-first: each build phase produces a committed Architecture Decision Record before any code that implements it. See [Roadmap](#-roadmap) below for the phase order.
+Architecturally, this project is being built ADR-first: each build phase produces a committed Architecture Decision Record before any code that implements it. See [Roadmap](#️-roadmap) below for the phase order.
 
 ---
 
 ## 📋 Contents
 
-- [📋 Contents](#-contents)
 - [🧰 Stack](#-stack)
 - [🚀 Running the Project](#-running-the-project)
 - [🏗️ Architecture](#-architecture)
 - [📚 Docs](#-docs)
-- [🗺️ Roadmap](#-roadmap)
+- [🗺️ Roadmap](#️-roadmap)
+  - [📋 Planned](#-planned)
+  - [🐛 Known issues](#-known-issues)
 
 ## 🧰 Stack
 
@@ -25,6 +26,7 @@ Architecturally, this project is being built ADR-first: each build phase produce
 - **SQLAlchemy 2.0** (sync, `psycopg` v3 driver) + **Alembic** — models and migrations
 - **pytest** + **factory_boy** — test stack, run against real Postgres (not SQLite) — see [ADR 0011](docs/adr/0011-test-stack.md)
 - **httpx** — Sentinel-L7 usage-pull client ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md))
+- **APScheduler** (in-process `BackgroundScheduler`) — real scheduling for the poller and monthly invoice generation ([ADR 0010](docs/adr/0010-scheduling.md))
 - Money columns (`unit_rate`, `line_total`) are `NUMERIC`/`Decimal`, never `float` — avoids floating-point imprecision in billing math
 
 See [ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md) for why this stack was chosen over the `ledger-l5-rails` prior art.
@@ -53,6 +55,8 @@ uv run uvicorn app.main:app --reload
 open http://localhost:8000/docs
 ```
 
+Starting the app also starts the in-process scheduler (poller every `POLL_INTERVAL_SECONDS`, monthly invoice job on the 1st — [ADR 0010](docs/adr/0010-scheduling.md)), which will try to reach `sentinel_l7_base_url` for real. If Sentinel-L7 isn't actually running locally, set `ENABLE_SCHEDULER=false` in `.env` to start the app without it — `POST /invoices` still works for manual/smoke-test runs either way.
+
 ### 🧪 Running Tests
 
 Tests run against the Neon `test` branch, configured via `.env.test`:
@@ -61,7 +65,7 @@ Tests run against the Neon `test` branch, configured via `.env.test`:
 uv run pytest
 ```
 
-Domain logic covers Phases 1–4 so far (foundations, usage ingestion, entitlements, billing engine). No poller or invoice-generation schedule exists yet — both run on demand; real scheduling is Phase 5. Seed a placeholder rate card with:
+Domain logic covers Phases 1–5 so far (foundations, usage ingestion, entitlements, billing engine, scheduling). The test suite runs with `ENABLE_SCHEDULER=false` (`.env.test`) so it never starts a real background scheduler. Seed a placeholder rate card with:
 
 ```bash
 uv run python -m scripts.seed_rate_card
@@ -69,12 +73,14 @@ uv run python -m scripts.seed_rate_card
 
 ## 🏗️ Architecture
 
-`customers` (UUID PK, no tenant isolation — [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md)) and `usage_events` (pulled from Sentinel-L7, classified per its ADR-0028 at pull time — [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md)) exist so far. Note `usage_events` has no `customer_id`: Sentinel-L7 has no customer/tenant model to pull one from (its own ADR-0020) — an open gap Phase 4 will have to resolve. The poll cursor is two independent integers (`since_transactions`, `since_compliance_events`), not a timestamp — [ADR 0003](docs/adr/0003-pull-not-push.md) — per Sentinel-L7's own companion ADR-0029 for the actual endpoint contract; not yet exercised against a live Sentinel-L7. `GET /entitlements/{customer_id}` ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md)) is live but stubbed — always `throttled: false` until the billing engine's real throttle rules are wired in (not yet — only rating/invoicing exist so far). `rate_cards` (customer-specific overrides a nullable-customer_id product default), `invoices`, and `invoice_line_items` exist per [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md)/[ADR 0009](docs/adr/0009-immutable-historical-invoices.md) — line items snapshot their rate at issue time, so editing `rate_cards` afterward never changes an issued invoice. Note invoice generation bills *all* billable usage for a product/metric/period to whichever customer is invoiced, unscoped by customer — `usage_events` still has no `customer_id` (Sentinel-L7 has no tenant model), correct only while there's one implicit customer. The planned shape, once Phase 5 lands:
+`customers` (UUID PK, no tenant isolation — [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md)) and `usage_events` (pulled from Sentinel-L7, classified per its ADR-0028 at pull time — [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md)) exist so far. Note `usage_events` has no `customer_id`: Sentinel-L7 has no customer/tenant model to pull one from (its own ADR-0020) — an open gap Phase 4 will have to resolve. The poll cursor is two independent integers (`since_transactions`, `since_compliance_events`), not a timestamp — [ADR 0003](docs/adr/0003-pull-not-push.md) — per Sentinel-L7's own companion ADR-0029 for the actual endpoint contract; not yet exercised against a live Sentinel-L7. `GET /entitlements/{customer_id}` ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md)) is live but stubbed — always `throttled: false` until the billing engine's real throttle rules are wired in (not yet — only rating/invoicing exist so far). `rate_cards` (customer-specific overrides a nullable-customer_id product default), `invoices`, and `invoice_line_items` exist per [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md)/[ADR 0009](docs/adr/0009-immutable-historical-invoices.md) — line items snapshot their rate at issue time, so editing `rate_cards` afterward never changes an issued invoice. Note invoice generation bills *all* billable usage for a product/metric/period to whichever customer is invoiced, unscoped by customer — `usage_events` still has no `customer_id` (Sentinel-L7 has no tenant model), correct only while there's one implicit customer. That's why the automatic invoice job (below) bills exactly one designated customer rather than looping every row in `customers` — see [ADR 0010](docs/adr/0010-scheduling.md).
+
+The poller and invoice generation are wired to an in-process scheduler ([ADR 0010](docs/adr/0010-scheduling.md)) — the poller runs every `POLL_INTERVAL_SECONDS` (default 60), and a monthly job bills the customer named by `BILLING_CUSTOMER_ID` for the previous calendar month (a no-op, logged as an error, until that setting is configured). `POST /invoices` generates a draft invoice on demand for any customer and any `period_start`/`period_end` — the way to bill someone other than the designated customer, or smoke-test a specific historical range, ahead of the Phase 6 dashboard existing to drive it. It's unauthenticated, same as `GET /entitlements/{customer_id}` — operator auth is Phase 6.
 
 ```mermaid
 flowchart LR
     subgraph Ingestion
-        A[Poller] -->|GET /usage?since_transactions&since_compliance_events| B[Sentinel-L7]
+        A[Poller<br/>every POLL_INTERVAL_SECONDS] -->|GET /usage?since_transactions&since_compliance_events| B[Sentinel-L7]
     end
     subgraph Storage
         C[(Postgres<br/>usage_events)]
@@ -82,17 +88,21 @@ flowchart LR
     end
     subgraph Billing
         E[Billing Engine]
+        M[Monthly job<br/>bills BILLING_CUSTOMER_ID]
     end
     subgraph API
         F[GET /entitlements/:customer_id]
+        G[POST /invoices<br/>any customer, custom range]
     end
     A --> C
     C --> E
+    M --> E
     E --> D
     D --> F
+    G --> E
 ```
 
-Domain code, once it exists, will be organized by phase — usage ingestion (Phase 2, done), entitlements (Phase 3, done), billing engine (Phase 4, done), scheduling (Phase 5).
+Domain code is organized by phase — usage ingestion (Phase 2), entitlements (Phase 3), billing engine (Phase 4), scheduling (Phase 5).
 
 ## 📚 Docs
 
@@ -105,10 +115,33 @@ Domain code, once it exists, will be organized by phase — usage ingestion (Pha
 
 ## 🗺️ Roadmap
 
+### 📋 Planned
+
 - [x] **Phase 0 — Repo scaffold:** `uv`-managed FastAPI + Pydantic v2 skeleton, `docs/adr/` established. ([ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md))
 - [x] **Phase 1 — Foundations:** pytest + factory_boy test stack against real Postgres (Neon branches), UUID primary keys, `customers` table, no multi-tenancy. ([ADR 0002](docs/adr/0002-uuid-primary-keys.md), [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md), [ADR 0011](docs/adr/0011-test-stack.md))
 - [x] **Phase 2 — Usage ingestion:** pull contract with Sentinel-L7, `usage_events` table, ADR-0028 billing classification at pull time. ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md), [ADR 0006](docs/adr/0006-single-hardcoded-product-no-plugin-system.md))
 - [x] **Phase 3 — Entitlement/throttle poll endpoint:** `GET /entitlements/:customer_id`, stubbed throttled:false, caller-side fail-open documented. ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md))
 - [x] **Phase 4 — Billing engine:** rate cards, override precedence, append-only invoices — rate snapshotted onto line items at issue time. ([ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md), [ADR 0009](docs/adr/0009-immutable-historical-invoices.md))
-- [ ] **Phase 5 — Scheduling:** wire the poller and invoice generation to real scheduling. (ADR 0010)
+- [x] **Phase 5 — Scheduling:** in-process scheduler polls on an interval and bills one designated customer monthly; `POST /invoices` covers any customer/custom range on demand; minimal Railway `Procfile` added. ([ADR 0010](docs/adr/0010-scheduling.md))
 - [ ] **Phase 6 — Deferred:** operator auth and dashboard. Not built until there's a concrete need. (ADR 0012)
+
+### 🐛 Known issues
+
+Each item below is a deliberate scope boundary from the ADR that set it, not an oversight — read as "true today, revisit when," not "broken."
+
+#### Single-customer scope (by design — no second customer exists yet)
+- **Invoice generation is unscoped by customer.** `usage_events` has no `customer_id`; `create_draft_invoice` bills all billable usage for a product/metric/period to whichever single customer it's given. Correct today because exactly one customer exists. **Revisit when:** Sentinel-L7 (or any product) can distinguish usage by customer — this aggregation logic changes at that point, not before. ([ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md), [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md))
+
+#### Blocked on a cross-repo dependency, not a Ledger-L5 gap
+- **The Sentinel-L7 usage-pull contract has never run against a live Sentinel-L7.** Phase 2 is built and tested entirely against fixtures matching the documented `GET /usage` shape. **Revisit when:** Sentinel-L7's own ADR-0029 is Accepted and the endpoint is live — this is an explicit, named blocking dependency, not something Ledger-L5 can close unilaterally. ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md))
+
+#### Deferred to Phase 6 (auth & access control)
+- **No authentication anywhere.** `GET /entitlements/{customer_id}` and `POST /invoices` are open; no access control on `customers`. Acceptable only on localhost or a trusted network. **Revisit when:** any deployment leaves a trusted network — this is a hard gate before that happens, not a nice-to-have. ([ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md), [ADR 0010](docs/adr/0010-scheduling.md))
+
+#### Stubbed pending a real rules decision
+- **Entitlement throttling is entirely stubbed.** `GET /entitlements/{customer_id}` always returns `throttled: false`. Fail-open on unreachable/stale response is a documented expectation for callers, not enforced logic yet. **Revisit when:** real throttle rules are defined, downstream of the rate-card work in [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md) — not tied to a specific phase number ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md) originally named Phase 4 as the trigger; Phase 4 shipped without wiring this, so that phase-based framing was corrected in the ADR itself rather than repeated here).
+
+#### Billing-correctness hardening (app-layer today, needs a second layer before scale)
+- **Invoice immutability is enforced by omission, not the database.** No service function mutates a line item or issued invoice's financial fields — but nothing at the DB level (trigger, `REVOKE UPDATE`) stops a direct SQL client or future admin tool from doing so. **Revisit when:** any tooling gets direct DB access beyond this service's own code path — the app-layer guarantee stops being sufficient at that point. ([ADR 0009](docs/adr/0009-immutable-historical-invoices.md))
+- **No duplicate-invoice guard.** Neither the monthly scheduled job nor `POST /invoices` checks for an existing invoice covering the same customer/product/metric/period before calling `create_draft_invoice`. **Revisit when:** a multi-replica deploy becomes real, or a manual/dashboard-driven re-run actually creates a duplicate — whichever happens first; this is reachable today from a manual re-run alone, not only from replica scaling. ([ADR 0010](docs/adr/0010-scheduling.md))
+- **Empty invoices are possible.** A zero-usage period still produces a draft invoice with zero line items. **Revisit when:** the zero-usage policy is actually decided — this is an open business-rule question (skip vs. issue a $0 invoice for record-keeping), not a defect either way. ([ADR 0010](docs/adr/0010-scheduling.md))

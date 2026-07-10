@@ -1,3 +1,5 @@
+import uuid
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,6 +9,9 @@ class Settings(BaseSettings):
     database_url: str
     sentinel_l7_base_url: str = "http://localhost:8001"
     entitlement_ttl_seconds: int = 60
+    poll_interval_seconds: int = 60
+    billing_customer_id: uuid.UUID | None = None
+    enable_scheduler: bool = True
 
 
 settings = Settings()

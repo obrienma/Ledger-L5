@@ -5,6 +5,7 @@ description = "Billing and usage-metering service for Sentinel-L7"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.18.5",
+    "apscheduler>=3.11.3",
     "fastapi>=0.139.0",
     "httpx>=0.28.1",
     "psycopg[binary]>=3.3.4",

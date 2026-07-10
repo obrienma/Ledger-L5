@@ -48,5 +48,5 @@ Fail-open (not fail-closed) is the right default for a throttle gate: the cost o
 ## Consequences
 
 - The response shape (`customer_id`, `throttled`, `reason`, `ttl_seconds`) is now a contract other services can build against — changing it later is a breaking change, not a stub-cleanup.
-- Phase 4 populates `throttled`/`reason` with a real decision; this ADR's stub logic (`throttled: false` always) is expected to be replaced, not extended, when that happens.
+- This ADR's stub logic (`throttled: false` always) is expected to be replaced, not extended, once real throttle rules exist. **Correction (Phase 5):** this was originally written as "Phase 4 populates `throttled`/`reason` with a real decision" — Phase 4 (the billing engine, ADR 0008/0009) shipped rate cards and invoicing but did not wire throttle rules into this endpoint, so that trigger has already passed without firing. The real trigger is a real throttle-rules decision downstream of ADR 0008's rate-card work, whenever that's built — not tied to a specific phase number.
 - `entitlement_ttl_seconds` lives in `Settings` as an environment-overridable placeholder, not hardcoded inline — consistent with treating it as a to-be-tuned operational parameter rather than a decision made here.

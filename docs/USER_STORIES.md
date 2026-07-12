@@ -123,7 +123,7 @@ Stories are organised by domain. Each story is marked with a status icon and a u
 
 - 🔲 🧾 **Have an issued invoice's PDF emailed to the customer**
   - *As a billing operator, I want an issued invoice's PDF emailed (attached or linked) to the customer automatically, so that sending an invoice doesn't require me to manually download and forward it.*
-  - TODO: planned next per ADR 0015's Consequences section — this ADR is a stated precondition for it, not yet its own ADR or code
+  - TODO: designed, not yet built — `POST /invoices/{id}/issue` will attach the rendered PDF and send via Resend, blocking the `issued` transition on send success (ADR 0016)
 
 ---
 

@@ -29,6 +29,7 @@ Architecturally, this project is being built ADR-first: each build phase produce
 - **APScheduler** (in-process `BackgroundScheduler`) — real scheduling for the poller and monthly invoice generation ([ADR 0010](docs/adr/0010-scheduling.md))
 - **Jinja2** (FastAPI's built-in `Jinja2Templates`) + **HTMX** (CDN, loaded but not yet used) — server-rendered operator dashboard, no SPA/JS build ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
 - **`stripe`** (official Python SDK) — test-mode-only Checkout Sessions and webhook signature verification for payment collection ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- **WeasyPrint** — renders `invoice_pdf.html` to PDF bytes for a temporary, operator-authenticated preview route ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md)); deployed on Railway via a root `railpack.json` (`deploy.aptPackages`) rather than a `nixpacks.toml` — Railway's current default builder is Railpack, not classic Nixpacks
 - Money columns (`unit_rate`, `line_total`) are `NUMERIC`/`Decimal`, never `float` — avoids floating-point imprecision in billing math
 
 See [ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md) for why this stack was chosen over the `ledger-l5-rails` prior art.
@@ -72,7 +73,7 @@ Tests run against the Neon `test` branch, configured via `.env.test`:
 uv run pytest
 ```
 
-Domain logic covers Phases 1–7 so far (foundations, usage ingestion, entitlements, billing engine, scheduling, operator auth/dashboard, Stripe payment collection). The test suite runs with `ENABLE_SCHEDULER=false` (`.env.test`) so it never starts a real background scheduler, and never calls a real Stripe API — `StripeClient` is only exercised through a hand-written `FakeStripeClient`, and webhook signature verification is tested against real HMAC signatures signed with the test-only `STRIPE_WEBHOOK_SECRET`. Seed a placeholder rate card with:
+Domain logic covers Phases 1–8 so far (foundations, usage ingestion, entitlements, billing engine, scheduling, operator auth/dashboard, Stripe payment collection, PDF invoice generation). The test suite runs with `ENABLE_SCHEDULER=false` (`.env.test`) so it never starts a real background scheduler, and never calls a real Stripe API — `StripeClient` is only exercised through a hand-written `FakeStripeClient`, and webhook signature verification is tested against real HMAC signatures signed with the test-only `STRIPE_WEBHOOK_SECRET`. Seed a placeholder rate card with:
 
 ```bash
 uv run python -m scripts.seed_rate_card
@@ -87,6 +88,8 @@ The poller and invoice generation are wired to an in-process scheduler ([ADR 001
 Operator auth and a dashboard exist as of Phase 6 ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md)): a static bearer token (`OPERATOR_API_TOKEN`), checked directly via `Authorization: Bearer <token>` on `POST /invoices`, or via a signed session cookie (set by `/login`) on the server-rendered `/dashboard/*` pages (invoice list/detail, usage events, a manual generate-invoice form — same `create_draft_invoice` code path `POST /invoices` uses, not a second one). `GET /entitlements/{customer_id}` is the one deliberate exception, left unauthenticated on purpose — it's Sentinel-L7 polling machine-to-machine, a different consumer with a different (fail-open) contract, ADR 0004.
 
 Stripe payment collection exists as of Phase 7 ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md)): `POST /invoices/{id}/checkout` (behind the same `require_operator_json` as `POST /invoices`) creates a test-mode Stripe Checkout Session for an `issued` invoice's total, idempotently — a repeat call reuses the existing session's URL as long as it's still `open`, only minting a new one if none exists yet or the prior one expired. `POST /webhooks/stripe` is the one route with no operator-token auth at all — it verifies the `Stripe-Signature` header over the raw request body instead, resolves the invoice via Stripe's own echoed-back `metadata.invoice_id` (never the mutable `stripe_checkout_session_id` column), and moves `issued → paid` on `checkout.session.completed`. A `stripe_events` table records processed event IDs so a retried webhook delivery is a no-op, not a second state transition. Stripe never meters usage or finalizes an invoice — both stay entirely internal; it is only ever told a final number and asked to collect it.
+
+PDF invoice generation exists as of Phase 8 ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md)): `app/services/invoice_pdf.py`'s `render_invoice_pdf(invoice, line_items)` is a pure rendering function — no DB session, no storage — that renders the standalone `app/templates/invoice_pdf.html` template (a separate template from the dashboard's `invoice_detail.html`, deliberately not sharing HTMX/nav chrome) via WeasyPrint into PDF bytes. It's exercised through `POST /invoices/{id}/pdf/preview` (behind the same `require_operator_json` as `POST /invoices`), a temporary route that returns the PDF directly and persists nothing — not yet wired to `transition_status`. WeasyPrint's Pango/HarfBuzz system-library dependency is satisfied on Railway via a root `railpack.json` (`deploy.aptPackages`), since Railway's current builder (Railpack) needs the libraries in the final runtime image, not just the build step.
 
 ```mermaid
 flowchart LR
@@ -114,6 +117,10 @@ flowchart LR
         S[Stripe Checkout<br/>test mode]
         W[POST /webhooks/stripe<br/>signature-verified, no bearer token]
     end
+    subgraph PDF
+        P[POST /invoices/:id/pdf/preview<br/>bearer token required, not persisted]
+        WP[WeasyPrint<br/>invoice_pdf.html]
+    end
     A --> C
     C --> E
     M --> E
@@ -126,9 +133,11 @@ flowchart LR
     H --> S
     S -->|checkout.session.completed| W
     W --> D
+    D --> P
+    P --> WP
 ```
 
-Domain code is organized by phase — usage ingestion (Phase 2), entitlements (Phase 3), billing engine (Phase 4), scheduling (Phase 5), operator auth and dashboard (Phase 6), Stripe payment collection (Phase 7).
+Domain code is organized by phase — usage ingestion (Phase 2), entitlements (Phase 3), billing engine (Phase 4), scheduling (Phase 5), operator auth and dashboard (Phase 6), Stripe payment collection (Phase 7), PDF invoice generation (Phase 8).
 
 ## 📚 Docs
 
@@ -151,7 +160,7 @@ Domain code is organized by phase — usage ingestion (Phase 2), entitlements (P
 - [x] **Phase 5 — Scheduling:** in-process scheduler polls on an interval and bills one designated customer monthly; `POST /invoices` covers any customer/custom range on demand; minimal Railway `Procfile` added. ([ADR 0010](docs/adr/0010-scheduling.md))
 - [x] **Phase 6 — Operator auth and dashboard:** static bearer-token auth (also now required on `POST /invoices`); server-rendered Jinja2 dashboard for invoices, usage events, and manual invoice generation. ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
 - [x] **Phase 7 — Stripe payment collection:** `POST /invoices/{id}/checkout` creates a test-mode Stripe Checkout Session for an issued invoice (idempotent per invoice); `POST /webhooks/stripe` verifies signatures and moves `issued → paid` on `checkout.session.completed`, resolved via Stripe session metadata, not the mutable session-ID column. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
-- [ ] **Phase 8 — PDF invoice generation:** WeasyPrint renders a dedicated `invoice_pdf.html` template to PDF bytes via `app/services/invoice_pdf.py`; exercised through a temporary, operator-authenticated preview route (not persisted, not yet wired to `transition_status`) to validate the template and the Railway/Railpack `deploy.aptPackages` build path end to end. Permanent wiring into the `issued` transition is deferred to Phase 9, once storage exists. ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md) — Accepted)
+- [x] **Phase 8 — PDF invoice generation:** WeasyPrint renders a dedicated `invoice_pdf.html` template to PDF bytes via `app/services/invoice_pdf.py`; exercised through a temporary, operator-authenticated preview route (`POST /invoices/{id}/pdf/preview`, not persisted, not yet wired to `transition_status`) that validates the template and the Railway/Railpack `deploy.aptPackages` build path end to end — verified against a live Railpack-format `railpack.json` and a real WeasyPrint render, not just unit tests. Permanent wiring into the `issued` transition is deferred to Phase 9, once storage exists. ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md) — Accepted)
 - [ ] **Phase 9 — Invoice PDF storage (Cloudflare R2):** generated PDF bytes are uploaded to R2 (`invoices/{invoice_id}.pdf`, key stored on `invoices.pdf_object_key`) as a real side effect of `transition_status(invoice, "issued")`, retiring Phase 8's preview route; retrieved via `GET /invoices/{id}/pdf`, streamed under the same operator auth as the rest of the dashboard. ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md) — Proposed)
 
 ### 🐛 Known issues

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Invoice {{ invoice.id }}</title>
+  <style>
+    @page { size: A4; margin: 2.5cm; }
+    body { font-family: sans-serif; color: #1a1a1a; }
+    h1 { font-size: 1.4rem; margin-bottom: 0; }
+    .meta { margin: 0.5rem 0 1.5rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 0.4rem 0.8rem; border-bottom: 1px solid #ddd; }
+    tfoot td { font-weight: bold; border-top: 2px solid #1a1a1a; border-bottom: none; }
+  </style>
+</head>
+<body>
+  <h1>Invoice {{ invoice.id }}</h1>
+  <p class="meta">
+    Customer: {{ invoice.customer.name }}<br>
+    Status: {{ invoice.status }}<br>
+    Period: {{ invoice.period_start | datetimeformat("%Y-%m-%d") }} &ndash; {{ invoice.period_end | datetimeformat("%Y-%m-%d") }}<br>
+    {% if invoice.issued_at %}Issued: {{ invoice.issued_at | datetimeformat }}<br>{% endif %}
+  </p>
+  <table>
+    <thead>
+      <tr><th>Product</th><th>Metric</th><th>Quantity</th><th>Unit rate</th><th>Line total</th></tr>
+    </thead>
+    <tbody>
+      {% for li in line_items %}
+      <tr>
+        <td>{{ li.product }}</td>
+        <td>{{ li.metric }}</td>
+        <td>{{ li.quantity }}</td>
+        <td>{{ li.unit_rate }}</td>
+        <td>{{ li.line_total }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5">No line items — zero billable usage for this period.</td></tr>
+      {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr><td colspan="4">Total</td><td>{{ total }}</td></tr>
+    </tfoot>
+  </table>
+</body>
+</html>

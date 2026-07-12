@@ -1,0 +1,6 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "deploy": {
+    "aptPackages": ["libpango-1.0-0", "libpangoft2-1.0-0", "libharfbuzz-subset0"]
+  }
+}

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from app.services.billing import (
     create_draft_invoice,
     previous_month_period,
 )
+from app.services.invoice_pdf import render_invoice_pdf
 from app.services.payments import get_or_create_checkout_session
 from app.services.usage_ingestion import METRIC_AI_CALL, PRODUCT
 
@@ -128,3 +129,23 @@ def create_checkout_session(
         checkout_url=checkout_url,
         stripe_checkout_session_id=invoice.stripe_checkout_session_id,
     )
+
+
+@router.post("/invoices/{invoice_id}/pdf/preview")
+def preview_invoice_pdf(
+    invoice_id: uuid.UUID, session: Session = Depends(get_session)
+) -> Response:
+    """Temporary, operator-authenticated route to validate the WeasyPrint
+    rendering path (ADR 0014) — not persisted, not wired to
+    transition_status. Retired in favor of GET /invoices/{id}/pdf once ADR
+    0015's storage lands."""
+    invoice = session.get(Invoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="invoice not found")
+
+    line_items = session.scalars(
+        select(InvoiceLineItem).where(InvoiceLineItem.invoice_id == invoice_id)
+    ).all()
+    pdf_bytes = render_invoice_pdf(invoice, line_items)
+
+    return Response(content=pdf_bytes, media_type="application/pdf")

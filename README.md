@@ -28,6 +28,7 @@ Architecturally, this project is being built ADR-first: each build phase produce
 - **httpx** — Sentinel-L7 usage-pull client ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md))
 - **APScheduler** (in-process `BackgroundScheduler`) — real scheduling for the poller and monthly invoice generation ([ADR 0010](docs/adr/0010-scheduling.md))
 - **Jinja2** (FastAPI's built-in `Jinja2Templates`) + **HTMX** (CDN, loaded but not yet used) — server-rendered operator dashboard, no SPA/JS build ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
+- **`stripe`** (official Python SDK) — test-mode-only Checkout Sessions and webhook signature verification for payment collection ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
 - Money columns (`unit_rate`, `line_total`) are `NUMERIC`/`Decimal`, never `float` — avoids floating-point imprecision in billing math
 
 See [ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md) for why this stack was chosen over the `ledger-l5-rails` prior art.
@@ -38,7 +39,7 @@ See [ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md) for why this 
 
 - **Python 3.12+**
 - **[uv](https://docs.astral.sh/uv/)**
-- A `.env` with `DATABASE_URL` pointing at the Neon `main` branch, plus `OPERATOR_API_TOKEN` and `SESSION_SECRET_KEY` (both required — the app fails to start without them, same as `DATABASE_URL`; see `.env.example`)
+- A `.env` with `DATABASE_URL` pointing at the Neon `main` branch, plus `OPERATOR_API_TOKEN`, `SESSION_SECRET_KEY`, `STRIPE_SECRET_KEY`, and `STRIPE_WEBHOOK_SECRET` (all four required — the app fails to start without them, same as `DATABASE_URL`; see `.env.example`). Stripe keys must be **test-mode** (`sk_test_...`/`whsec_...`) — ADR 0013.
 
 ### ⚡ Quick Start
 
@@ -71,7 +72,7 @@ Tests run against the Neon `test` branch, configured via `.env.test`:
 uv run pytest
 ```
 
-Domain logic covers Phases 1–5 so far (foundations, usage ingestion, entitlements, billing engine, scheduling). The test suite runs with `ENABLE_SCHEDULER=false` (`.env.test`) so it never starts a real background scheduler. Seed a placeholder rate card with:
+Domain logic covers Phases 1–7 so far (foundations, usage ingestion, entitlements, billing engine, scheduling, operator auth/dashboard, Stripe payment collection). The test suite runs with `ENABLE_SCHEDULER=false` (`.env.test`) so it never starts a real background scheduler, and never calls a real Stripe API — `StripeClient` is only exercised through a hand-written `FakeStripeClient`, and webhook signature verification is tested against real HMAC signatures signed with the test-only `STRIPE_WEBHOOK_SECRET`. Seed a placeholder rate card with:
 
 ```bash
 uv run python -m scripts.seed_rate_card
@@ -84,6 +85,8 @@ uv run python -m scripts.seed_rate_card
 The poller and invoice generation are wired to an in-process scheduler ([ADR 0010](docs/adr/0010-scheduling.md)) — the poller runs every `POLL_INTERVAL_SECONDS` (default 60), and a monthly job bills the customer named by `BILLING_CUSTOMER_ID` for the previous calendar month (a no-op, logged as an error, until that setting is configured). `POST /invoices` generates a draft invoice on demand for any customer and any `period_start`/`period_end` — the way to bill someone other than the designated customer, or smoke-test a specific historical range.
 
 Operator auth and a dashboard exist as of Phase 6 ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md)): a static bearer token (`OPERATOR_API_TOKEN`), checked directly via `Authorization: Bearer <token>` on `POST /invoices`, or via a signed session cookie (set by `/login`) on the server-rendered `/dashboard/*` pages (invoice list/detail, usage events, a manual generate-invoice form — same `create_draft_invoice` code path `POST /invoices` uses, not a second one). `GET /entitlements/{customer_id}` is the one deliberate exception, left unauthenticated on purpose — it's Sentinel-L7 polling machine-to-machine, a different consumer with a different (fail-open) contract, ADR 0004.
+
+Stripe payment collection exists as of Phase 7 ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md)): `POST /invoices/{id}/checkout` (behind the same `require_operator_json` as `POST /invoices`) creates a test-mode Stripe Checkout Session for an `issued` invoice's total, idempotently — a repeat call reuses the existing session's URL as long as it's still `open`, only minting a new one if none exists yet or the prior one expired. `POST /webhooks/stripe` is the one route with no operator-token auth at all — it verifies the `Stripe-Signature` header over the raw request body instead, resolves the invoice via Stripe's own echoed-back `metadata.invoice_id` (never the mutable `stripe_checkout_session_id` column), and moves `issued → paid` on `checkout.session.completed`. A `stripe_events` table records processed event IDs so a retried webhook delivery is a no-op, not a second state transition. Stripe never meters usage or finalizes an invoice — both stay entirely internal; it is only ever told a final number and asked to collect it.
 
 ```mermaid
 flowchart LR
@@ -101,10 +104,15 @@ flowchart LR
     subgraph API
         F[GET /entitlements/:customer_id<br/>unauthenticated]
         G[POST /invoices<br/>bearer token required]
+        H[POST /invoices/:id/checkout<br/>bearer token required]
     end
     subgraph Operator
         L[GET/POST /login]
         Dash[/dashboard/*<br/>session cookie required/]
+    end
+    subgraph Payments
+        S[Stripe Checkout<br/>test mode]
+        W[POST /webhooks/stripe<br/>signature-verified, no bearer token]
     end
     A --> C
     C --> E
@@ -114,9 +122,13 @@ flowchart LR
     G --> E
     L --> Dash
     Dash --> E
+    D --> H
+    H --> S
+    S -->|checkout.session.completed| W
+    W --> D
 ```
 
-Domain code is organized by phase — usage ingestion (Phase 2), entitlements (Phase 3), billing engine (Phase 4), scheduling (Phase 5), operator auth and dashboard (Phase 6).
+Domain code is organized by phase — usage ingestion (Phase 2), entitlements (Phase 3), billing engine (Phase 4), scheduling (Phase 5), operator auth and dashboard (Phase 6), Stripe payment collection (Phase 7).
 
 ## 📚 Docs
 
@@ -138,7 +150,7 @@ Domain code is organized by phase — usage ingestion (Phase 2), entitlements (P
 - [x] **Phase 4 — Billing engine:** rate cards, override precedence, append-only invoices — rate snapshotted onto line items at issue time. ([ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md), [ADR 0009](docs/adr/0009-immutable-historical-invoices.md))
 - [x] **Phase 5 — Scheduling:** in-process scheduler polls on an interval and bills one designated customer monthly; `POST /invoices` covers any customer/custom range on demand; minimal Railway `Procfile` added. ([ADR 0010](docs/adr/0010-scheduling.md))
 - [x] **Phase 6 — Operator auth and dashboard:** static bearer-token auth (also now required on `POST /invoices`); server-rendered Jinja2 dashboard for invoices, usage events, and manual invoice generation. ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
-- [ ] **Phase 7 — Stripe payment collection:** `POST /invoices/{id}/checkout` creates a test-mode Stripe Checkout Session for an issued invoice (idempotent per invoice); `POST /webhooks/stripe` verifies signatures and moves `issued → paid` on `checkout.session.completed`, resolved via Stripe session metadata, not the mutable session-ID column. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- [x] **Phase 7 — Stripe payment collection:** `POST /invoices/{id}/checkout` creates a test-mode Stripe Checkout Session for an issued invoice (idempotent per invoice); `POST /webhooks/stripe` verifies signatures and moves `issued → paid` on `checkout.session.completed`, resolved via Stripe session metadata, not the mutable session-ID column. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
 
 ### 🐛 Known issues
 
@@ -155,6 +167,11 @@ Each item below is a deliberate scope boundary from the ADR that set it, not an 
 
 #### Stubbed pending a real rules decision
 - **Entitlement throttling is entirely stubbed.** `GET /entitlements/{customer_id}` always returns `throttled: false`. Fail-open on unreachable/stale response is a documented expectation for callers, not enforced logic yet. **Revisit when:** real throttle rules are defined, downstream of the rate-card work in [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md) — not tied to a specific phase number ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md) originally named Phase 4 as the trigger; Phase 4 shipped without wiring this, so that phase-based framing was corrected in the ADR itself rather than repeated here).
+
+#### Stripe payment collection (ADR 0013 — deliberate scope boundaries)
+- **No dedicated handling for an abandoned Checkout session.** Stripe pushes an `expired` event, not a distinct "canceled" one, when a payer closes the tab without paying. Not solved here: the idempotent-reuse behavior in `POST /invoices/{id}/checkout` means a payer who comes back later just resumes (or regenerates, once expired) the same flow. **Revisit if:** a real reason emerges to distinguish "abandoned" from "in progress" server-side rather than leaving it to Stripe's own session lifecycle. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- **No dashboard "Pay" button and no email delivery of the Checkout link yet.** Both are explicitly out of scope for this phase — a future "Pay" button would call `get_or_create_checkout_session` directly, the same way the existing generate-invoice dashboard form calls `create_draft_invoice` directly (Phase 6's established pattern), not a second HTTP call to `POST /invoices/{id}/checkout`. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- **Test mode only.** Switching to a live Stripe account (real API keys) is the concrete trigger for revisiting this ADR — nothing about the architecture changes, only the fact that a real charge becomes possible. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
 
 #### Billing-correctness hardening (app-layer today, needs a second layer before scale)
 - **Invoice immutability is enforced by omission, not the database.** No service function mutates a line item or issued invoice's financial fields — but nothing at the DB level (trigger, `REVOKE UPDATE`) stops a direct SQL client or future admin tool from doing so. **Revisit when:** any tooling gets direct DB access beyond this service's own code path — the app-layer guarantee stops being sufficient at that point. ([ADR 0009](docs/adr/0009-immutable-historical-invoices.md))

@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     enable_scheduler: bool = True
     operator_api_token: str
     session_secret_key: str
+    stripe_secret_key: str
+    stripe_webhook_secret: str
+    app_base_url: str = "http://localhost:8000"
 
 
 settings = Settings()

@@ -117,3 +117,5 @@ def transition_status(invoice: Invoice, new_status: str) -> None:
     invoice.status = new_status
     if new_status == "issued":
         invoice.issued_at = datetime.now(timezone.utc)
+    elif new_status == "paid":
+        invoice.paid_at = datetime.now(timezone.utc)

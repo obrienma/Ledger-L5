@@ -8,13 +8,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_operator_json
+from app.config import settings
 from app.db import get_session
-from app.models import Customer, InvoiceLineItem
+from app.integrations.stripe import CheckoutClient, StripeClient
+from app.models import Customer, Invoice, InvoiceLineItem
 from app.services.billing import (
     NoApplicableRateError,
     create_draft_invoice,
     previous_month_period,
 )
+from app.services.payments import get_or_create_checkout_session
 from app.services.usage_ingestion import METRIC_AI_CALL, PRODUCT
 
 router = APIRouter(dependencies=[Depends(require_operator_json)])
@@ -84,4 +87,44 @@ def generate_invoice(
             )
             for li in line_items
         ],
+    )
+
+
+def get_stripe_client() -> CheckoutClient:
+    return StripeClient()
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+    stripe_checkout_session_id: str
+
+
+@router.post("/invoices/{invoice_id}/checkout", response_model=CheckoutResponse)
+def create_checkout_session(
+    invoice_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    stripe_client: CheckoutClient = Depends(get_stripe_client),
+) -> CheckoutResponse:
+    invoice = session.get(Invoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="invoice not found")
+    if invoice.status != "issued":
+        raise HTTPException(
+            status_code=409,
+            detail=f"invoice status is {invoice.status!r}, expected 'issued'",
+        )
+
+    redirect_url = f"{settings.app_base_url}/dashboard/invoices/{invoice.id}"
+    checkout_url = get_or_create_checkout_session(
+        session,
+        invoice,
+        stripe_client,
+        success_url=redirect_url,
+        cancel_url=redirect_url,
+    )
+    session.commit()
+
+    return CheckoutResponse(
+        checkout_url=checkout_url,
+        stripe_checkout_session_id=invoice.stripe_checkout_session_id,
     )

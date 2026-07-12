@@ -1,4 +1,8 @@
+import hashlib
+import hmac
+import time
 from datetime import datetime, timezone
+from decimal import Decimal
 
 
 class FakeSentinelL7Client:
@@ -39,3 +43,46 @@ def compliance_event_row(row_id: int, **fields) -> dict:
         "created_at": datetime.now(timezone.utc).isoformat(),
         **fields,
     }
+
+
+class FakeStripeClient:
+    """Stands in for StripeClient at the CheckoutClient Protocol boundary — no
+    real Stripe API call is made. Sessions live in-memory keyed by id, so
+    retrieve_session reflects whatever create_checkout_session (or a test's
+    own setup) previously produced. Tests can also pre-seed `sessions` to
+    simulate an existing open/expired session before calling code under
+    test."""
+
+    def __init__(self) -> None:
+        self.sessions: dict[str, dict] = {}
+        self.create_calls: list[tuple[str, Decimal]] = []
+        self._next_id = 1
+
+    def create_checkout_session(
+        self, invoice_id: str, amount: Decimal, success_url: str, cancel_url: str
+    ) -> dict:
+        self.create_calls.append((invoice_id, amount))
+        session_id = f"cs_test_{self._next_id}"
+        self._next_id += 1
+        session = {
+            "id": session_id,
+            "url": f"https://checkout.stripe.com/test/{session_id}",
+            "status": "open",
+            "metadata": {"invoice_id": invoice_id},
+        }
+        self.sessions[session_id] = session
+        return session
+
+    def retrieve_session(self, session_id: str) -> dict:
+        return self.sessions[session_id]
+
+
+def sign_stripe_payload(payload: bytes, secret: str, timestamp: int | None = None) -> str:
+    """Hand-builds a valid Stripe-Signature header value per Stripe's public,
+    documented scheme (t=<unix ts>,v1=<hmac>) — no live Stripe account or
+    private SDK helper needed to produce a header stripe.Webhook.construct_event
+    will accept."""
+    ts = timestamp if timestamp is not None else int(time.time())
+    signed_payload = f"{ts}.".encode() + payload
+    signature = hmac.new(secret.encode(), signed_payload, hashlib.sha256).hexdigest()
+    return f"t={ts},v1={signature}"

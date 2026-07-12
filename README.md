@@ -151,6 +151,7 @@ Domain code is organized by phase — usage ingestion (Phase 2), entitlements (P
 - [x] **Phase 5 — Scheduling:** in-process scheduler polls on an interval and bills one designated customer monthly; `POST /invoices` covers any customer/custom range on demand; minimal Railway `Procfile` added. ([ADR 0010](docs/adr/0010-scheduling.md))
 - [x] **Phase 6 — Operator auth and dashboard:** static bearer-token auth (also now required on `POST /invoices`); server-rendered Jinja2 dashboard for invoices, usage events, and manual invoice generation. ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
 - [x] **Phase 7 — Stripe payment collection:** `POST /invoices/{id}/checkout` creates a test-mode Stripe Checkout Session for an issued invoice (idempotent per invoice); `POST /webhooks/stripe` verifies signatures and moves `issued → paid` on `checkout.session.completed`, resolved via Stripe session metadata, not the mutable session-ID column. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- [ ] **Phase 8 — PDF invoice generation:** WeasyPrint renders a dedicated `invoice_pdf.html` template to PDF bytes, generated once inside `transition_status(invoice, "issued")` rather than on demand — storage of the resulting bytes is a separate decision (ADR 0015). ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md))
 
 ### 🐛 Known issues
 

@@ -151,6 +151,7 @@ Domain code is organized by phase — usage ingestion (Phase 2), entitlements (P
 | File | Contents |
 | --- | --- |
 | [README.md](README.md) | Project overview |
+| [USER_STORIES.md](docs/USER_STORIES.md) | User stories by domain — implemented, aspirational, and deliberately deferred |
 | [adr/](docs/adr/) | Architecture Decision Records |
 | [journal/](docs/journal/) | Engineering journal — one entry per phase |
 | [probes/](docs/probes/) | Anki spaced-repetition probe cards, paired with journal entries |

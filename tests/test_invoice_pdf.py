@@ -4,11 +4,14 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
+from app.api.invoices import get_storage_client
 from app.config import settings
+from app.main import app
 from app.models import InvoiceLineItem, RateCard, UsageEvent
 from app.services.billing import create_draft_invoice
 from app.services.invoice_pdf import render_invoice_pdf
 from tests.factories import CustomerFactory
+from tests.fakes import FakeObjectStorageClient
 
 PRODUCT = "sentinel-l7"
 METRIC = "ai_call"
@@ -82,27 +85,106 @@ def test_render_invoice_pdf_handles_zero_line_items(db_session):
     assert pdf_bytes.startswith(b"%PDF")
 
 
-def test_preview_endpoint_returns_a_pdf(client, db_session):
+def _override_storage_client(fake: FakeObjectStorageClient) -> None:
+    app.dependency_overrides[get_storage_client] = lambda: fake
+
+
+def test_issue_endpoint_transitions_and_uploads_pdf(client, db_session):
+    invoice = _draft_invoice(db_session)
+    fake = FakeObjectStorageClient()
+    _override_storage_client(fake)
+
+    response = client.post(f"/invoices/{invoice.id}/issue", headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "issued"
+    key = f"invoices/{invoice.id}.pdf"
+    assert fake.objects[key].startswith(b"%PDF")
+    db_session.refresh(invoice)
+    assert invoice.pdf_object_key == key
+    assert invoice.issued_at is not None
+
+
+def test_issue_endpoint_still_issues_when_upload_fails(client, db_session):
+    invoice = _draft_invoice(db_session)
+    fake = FakeObjectStorageClient()
+    fake.fail_upload = True
+    _override_storage_client(fake)
+
+    response = client.post(f"/invoices/{invoice.id}/issue", headers=AUTH_HEADERS)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "issued"
+    db_session.refresh(invoice)
+    assert invoice.status == "issued"
+    assert invoice.pdf_object_key is None
+
+
+def test_issue_endpoint_404s_for_unknown_invoice(client):
+    fake = FakeObjectStorageClient()
+    _override_storage_client(fake)
+
+    response = client.post(f"/invoices/{uuid.uuid4()}/issue", headers=AUTH_HEADERS)
+
+    assert response.status_code == 404
+
+
+def test_issue_endpoint_409s_for_an_already_issued_invoice(client, db_session):
+    invoice = _draft_invoice(db_session)
+    fake = FakeObjectStorageClient()
+    _override_storage_client(fake)
+    first = client.post(f"/invoices/{invoice.id}/issue", headers=AUTH_HEADERS)
+    assert first.status_code == 200
+
+    second = client.post(f"/invoices/{invoice.id}/issue", headers=AUTH_HEADERS)
+
+    assert second.status_code == 409
+
+
+def test_issue_endpoint_401s_with_no_token(client, db_session):
     invoice = _draft_invoice(db_session)
 
-    response = client.post(f"/invoices/{invoice.id}/pdf/preview", headers=AUTH_HEADERS)
+    response = client.post(f"/invoices/{invoice.id}/issue")
+
+    assert response.status_code == 401
+
+
+def test_download_endpoint_streams_the_uploaded_pdf(client, db_session):
+    invoice = _draft_invoice(db_session)
+    fake = FakeObjectStorageClient()
+    _override_storage_client(fake)
+    issue_response = client.post(f"/invoices/{invoice.id}/issue", headers=AUTH_HEADERS)
+    assert issue_response.status_code == 200
+
+    response = client.get(f"/invoices/{invoice.id}/pdf", headers=AUTH_HEADERS)
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
     assert response.content.startswith(b"%PDF")
 
 
-def test_preview_endpoint_404s_for_unknown_invoice(client):
-    response = client.post(
-        f"/invoices/{uuid.uuid4()}/pdf/preview", headers=AUTH_HEADERS
-    )
+def test_download_endpoint_404s_when_no_pdf_generated_yet(client, db_session):
+    invoice = _draft_invoice(db_session)
+    fake = FakeObjectStorageClient()
+    _override_storage_client(fake)
+
+    response = client.get(f"/invoices/{invoice.id}/pdf", headers=AUTH_HEADERS)
 
     assert response.status_code == 404
 
 
-def test_preview_endpoint_401s_with_no_token(client, db_session):
+def test_download_endpoint_404s_for_unknown_invoice(client):
+    fake = FakeObjectStorageClient()
+    _override_storage_client(fake)
+
+    response = client.get(f"/invoices/{uuid.uuid4()}/pdf", headers=AUTH_HEADERS)
+
+    assert response.status_code == 404
+
+
+def test_download_endpoint_401s_with_no_token(client, db_session):
     invoice = _draft_invoice(db_session)
 
-    response = client.post(f"/invoices/{invoice.id}/pdf/preview")
+    response = client.get(f"/invoices/{invoice.id}/pdf")
 
     assert response.status_code == 401

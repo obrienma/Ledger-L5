@@ -1,6 +1,6 @@
 # ADR 0015 — Cloudflare R2 for Invoice PDF Storage
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-11
 
 ---
@@ -40,6 +40,7 @@ Streaming through this system's own auth rather than serving a public or presign
 
 ## Consequences
 
+- **Implementation note (added when this ADR moved to Accepted):** no route anywhere in the system called `transition_status(invoice, "issued")` before this phase — Phase 6's dashboard and Phase 7's `/checkout` both only ever operate on invoices already issued by some unspecified means. This ADR's "in the `transition_status(invoice, "issued")` path" therefore required adding that path for the first time: `POST /invoices/{invoice_id}/issue` (`require_operator_json`, same auth as `POST /invoices`) is the one place a draft invoice becomes issued, renders its PDF, and uploads it to R2, in that order, within one request/commit.
 - `app/integrations/object_storage.py` is the only place R2 credentials and endpoint config are referenced — `.env.example` gains `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, all required once this phase is built, no defaults, matching the `OPERATOR_API_TOKEN`/Stripe-key precedent.
 - An issued invoice with `pdf_object_key IS NULL` is a valid, if degraded, state — dashboard/email code paths need to handle "no PDF yet" rather than assuming one always exists once `issued_at` is set.
 - Email delivery (planned, next) attaches or links to this object rather than generating anything itself — this ADR is a precondition for that phase, not the reverse.

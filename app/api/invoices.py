@@ -10,14 +10,17 @@ from sqlalchemy.orm import Session
 from app.auth import require_operator_json
 from app.config import settings
 from app.db import get_session
+from app.integrations.object_storage import ObjectStorageClient, R2Client
 from app.integrations.stripe import CheckoutClient, StripeClient
 from app.models import Customer, Invoice, InvoiceLineItem
 from app.services.billing import (
+    InvalidStatusTransitionError,
     NoApplicableRateError,
     create_draft_invoice,
     previous_month_period,
+    transition_status,
 )
-from app.services.invoice_pdf import render_invoice_pdf
+from app.services.invoice_pdf import generate_and_store_pdf
 from app.services.payments import get_or_create_checkout_session
 from app.services.usage_ingestion import METRIC_AI_CALL, PRODUCT
 
@@ -131,21 +134,69 @@ def create_checkout_session(
     )
 
 
-@router.post("/invoices/{invoice_id}/pdf/preview")
-def preview_invoice_pdf(
-    invoice_id: uuid.UUID, session: Session = Depends(get_session)
-) -> Response:
-    """Temporary, operator-authenticated route to validate the WeasyPrint
-    rendering path (ADR 0014) — not persisted, not wired to
-    transition_status. Retired in favor of GET /invoices/{id}/pdf once ADR
-    0015's storage lands."""
+def get_storage_client() -> ObjectStorageClient:
+    return R2Client()
+
+
+@router.post("/invoices/{invoice_id}/issue", response_model=InvoiceResponse)
+def issue_invoice(
+    invoice_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    storage_client: ObjectStorageClient = Depends(get_storage_client),
+) -> InvoiceResponse:
+    """Transitions a draft invoice to issued and renders+uploads its PDF to R2
+    as a side effect (ADR 0015) — the only place in the system that ever
+    reaches the 'issued' state. Storage upload failure does not fail this
+    transition; see generate_and_store_pdf."""
     invoice = session.get(Invoice, invoice_id)
     if invoice is None:
         raise HTTPException(status_code=404, detail="invoice not found")
 
+    try:
+        transition_status(invoice, "issued")
+    except InvalidStatusTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
     line_items = session.scalars(
         select(InvoiceLineItem).where(InvoiceLineItem.invoice_id == invoice_id)
     ).all()
-    pdf_bytes = render_invoice_pdf(invoice, line_items)
+    generate_and_store_pdf(invoice, line_items, storage_client)
+
+    session.commit()
+
+    return InvoiceResponse(
+        id=invoice.id,
+        customer_id=invoice.customer_id,
+        status=invoice.status,
+        period_start=invoice.period_start,
+        period_end=invoice.period_end,
+        line_items=[
+            InvoiceLineItemResponse(
+                product=li.product,
+                metric=li.metric,
+                quantity=li.quantity,
+                unit_rate=li.unit_rate,
+                line_total=li.line_total,
+            )
+            for li in line_items
+        ],
+    )
+
+
+@router.get("/invoices/{invoice_id}/pdf")
+def download_invoice_pdf(
+    invoice_id: uuid.UUID,
+    session: Session = Depends(get_session),
+    storage_client: ObjectStorageClient = Depends(get_storage_client),
+) -> Response:
+    """Streams the invoice's PDF from R2 through this system's own operator
+    auth rather than a public or presigned R2 URL (ADR 0015)."""
+    invoice = session.get(Invoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="invoice not found")
+    if invoice.pdf_object_key is None:
+        raise HTTPException(status_code=404, detail="no PDF generated for this invoice yet")
+
+    pdf_bytes = storage_client.download(invoice.pdf_object_key)
 
     return Response(content=pdf_bytes, media_type="application/pdf")

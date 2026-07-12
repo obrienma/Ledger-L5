@@ -77,6 +77,25 @@ class FakeStripeClient:
         return self.sessions[session_id]
 
 
+class FakeObjectStorageClient:
+    """Stands in for R2Client at the ObjectStorageClient Protocol boundary —
+    no real R2/S3 call is made. Objects live in-memory keyed by key. Set
+    `fail_upload = True` to simulate an R2 outage and exercise the
+    upload-failure-doesn't-fail-issuance path (ADR 0015)."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        self.fail_upload = False
+
+    def upload(self, key: str, data: bytes, content_type: str) -> None:
+        if self.fail_upload:
+            raise RuntimeError("simulated R2 upload failure")
+        self.objects[key] = data
+
+    def download(self, key: str) -> bytes:
+        return self.objects[key]
+
+
 def sign_stripe_payload(payload: bytes, secret: str, timestamp: int | None = None) -> str:
     """Hand-builds a valid Stripe-Signature header value per Stripe's public,
     documented scheme (t=<unix ts>,v1=<hmac>) — no live Stripe account or

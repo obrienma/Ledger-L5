@@ -1,9 +1,13 @@
+import logging
 from decimal import Decimal
 
 from weasyprint import HTML
 
+from app.integrations.object_storage import ObjectStorageClient
 from app.models import Invoice, InvoiceLineItem
 from app.templates import templates
+
+logger = logging.getLogger(__name__)
 
 
 def render_invoice_pdf(invoice: Invoice, line_items: list[InvoiceLineItem]) -> bytes:
@@ -17,3 +21,25 @@ def render_invoice_pdf(invoice: Invoice, line_items: list[InvoiceLineItem]) -> b
         invoice=invoice, line_items=line_items, total=total
     )
     return HTML(string=html).write_pdf()
+
+
+def generate_and_store_pdf(
+    invoice: Invoice,
+    line_items: list[InvoiceLineItem],
+    storage_client: ObjectStorageClient,
+) -> None:
+    """Renders the PDF and uploads it to R2, setting invoice.pdf_object_key on
+    success (ADR 0015). Deliberately catches any upload failure rather than
+    letting it propagate: the invoice's issued status must not depend on a
+    downstream storage call succeeding — a null pdf_object_key on an issued
+    invoice is a legitimate, checkable state, logged here and left for the
+    caller to commit regardless. Does not commit — matches
+    transition_status's and get_or_create_checkout_session's convention."""
+    pdf_bytes = render_invoice_pdf(invoice, line_items)
+    key = f"invoices/{invoice.id}.pdf"
+    try:
+        storage_client.upload(key, pdf_bytes, content_type="application/pdf")
+    except Exception:
+        logger.exception("failed to upload invoice PDF to object storage: invoice_id=%s", invoice.id)
+        return
+    invoice.pdf_object_key = key

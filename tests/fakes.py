@@ -96,6 +96,31 @@ class FakeObjectStorageClient:
         return self.objects[key]
 
 
+class FakeEmailClient:
+    """Stands in for ResendClient at the EmailClient Protocol boundary — no
+    real Resend API call is made. Set `fail_send = True` to simulate a
+    provider outage and exercise the blocking-on-send-failure path (ADR
+    0016)."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.fail_send = False
+
+    def send_invoice_email(
+        self, to_email: str, subject: str, pdf_bytes: bytes, filename: str
+    ) -> None:
+        if self.fail_send:
+            raise RuntimeError("simulated Resend send failure")
+        self.sent.append(
+            {
+                "to_email": to_email,
+                "subject": subject,
+                "pdf_bytes": pdf_bytes,
+                "filename": filename,
+            }
+        )
+
+
 def sign_stripe_payload(payload: bytes, secret: str, timestamp: int | None = None) -> str:
     """Hand-builds a valid Stripe-Signature header value per Stripe's public,
     documented scheme (t=<unix ts>,v1=<hmac>) — no live Stripe account or

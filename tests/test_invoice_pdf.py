@@ -4,14 +4,14 @@ from decimal import Decimal
 
 from sqlalchemy import select
 
-from app.api.invoices import get_storage_client
+from app.api.invoices import get_email_client, get_storage_client
 from app.config import settings
 from app.main import app
 from app.models import InvoiceLineItem, RateCard, UsageEvent
 from app.services.billing import create_draft_invoice
 from app.services.invoice_pdf import render_invoice_pdf
 from tests.factories import CustomerFactory
-from tests.fakes import FakeObjectStorageClient
+from tests.fakes import FakeEmailClient, FakeObjectStorageClient
 
 PRODUCT = "sentinel-l7"
 METRIC = "ai_call"
@@ -87,6 +87,10 @@ def test_render_invoice_pdf_handles_zero_line_items(db_session):
 
 def _override_storage_client(fake: FakeObjectStorageClient) -> None:
     app.dependency_overrides[get_storage_client] = lambda: fake
+    # Phase 10 (ADR 0016): /issue now also emails the customer — override with
+    # a fake here too so these PDF/storage-focused tests never attempt a real
+    # Resend API call.
+    app.dependency_overrides[get_email_client] = lambda: FakeEmailClient()
 
 
 def test_issue_endpoint_transitions_and_uploads_pdf(client, db_session):

@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_operator_json
 from app.config import settings
 from app.db import get_session
+from app.integrations.email import EmailClient, ResendClient
 from app.integrations.object_storage import ObjectStorageClient, R2Client
 from app.integrations.stripe import CheckoutClient, StripeClient
 from app.models import Customer, Invoice, InvoiceLineItem
@@ -18,9 +19,8 @@ from app.services.billing import (
     NoApplicableRateError,
     create_draft_invoice,
     previous_month_period,
-    transition_status,
 )
-from app.services.invoice_pdf import generate_and_store_pdf
+from app.services.invoice_issuance import issue_invoice
 from app.services.payments import get_or_create_checkout_session
 from app.services.usage_ingestion import METRIC_AI_CALL, PRODUCT
 
@@ -138,31 +138,49 @@ def get_storage_client() -> ObjectStorageClient:
     return R2Client()
 
 
+def get_email_client() -> EmailClient:
+    return ResendClient()
+
+
+class IssueInvoiceRequest(BaseModel):
+    customer_email: EmailStr | None = None
+
+
 @router.post("/invoices/{invoice_id}/issue", response_model=InvoiceResponse)
-def issue_invoice(
+def issue_invoice_endpoint(
     invoice_id: uuid.UUID,
+    body: IssueInvoiceRequest | None = None,
     session: Session = Depends(get_session),
     storage_client: ObjectStorageClient = Depends(get_storage_client),
+    email_client: EmailClient = Depends(get_email_client),
 ) -> InvoiceResponse:
-    """Transitions a draft invoice to issued and renders+uploads its PDF to R2
-    as a side effect (ADR 0015) — the only place in the system that ever
-    reaches the 'issued' state. Storage upload failure does not fail this
-    transition; see generate_and_store_pdf."""
+    """Transitions a draft invoice to issued, renders+uploads its PDF to R2
+    (ADR 0015), and emails the same PDF to the customer (ADR 0016) — the only
+    place in the system that ever reaches the 'issued' state. Storage upload
+    failure does not fail this transition; a failed email send does — see
+    app/services/invoice_issuance.py."""
     invoice = session.get(Invoice, invoice_id)
     if invoice is None:
         raise HTTPException(status_code=404, detail="invoice not found")
 
+    customer = invoice.customer
+    to_email = (body.customer_email if body else None) or customer.email
+    if not to_email:
+        raise HTTPException(status_code=422, detail="customer has no email on file")
+
     try:
-        transition_status(invoice, "issued")
+        issue_invoice(session, invoice, customer, to_email, storage_client, email_client)
     except InvalidStatusTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=502, detail="failed to send invoice email") from e
+
+    session.commit()
 
     line_items = session.scalars(
         select(InvoiceLineItem).where(InvoiceLineItem.invoice_id == invoice_id)
     ).all()
-    generate_and_store_pdf(invoice, line_items, storage_client)
-
-    session.commit()
 
     return InvoiceResponse(
         id=invoice.id,

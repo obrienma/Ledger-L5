@@ -3,17 +3,23 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
+from pydantic import EmailStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
+from app.api.invoices import get_email_client, get_storage_client
 from app.auth import require_operator_browser
 from app.db import get_session
+from app.integrations.email import EmailClient
+from app.integrations.object_storage import ObjectStorageClient
 from app.models import Customer, Invoice, InvoiceLineItem, UsageEvent
 from app.services.billing import (
+    InvalidStatusTransitionError,
     NoApplicableRateError,
     create_draft_invoice,
     previous_month_period,
 )
+from app.services.invoice_issuance import issue_invoice
 from app.services.usage_ingestion import METRIC_AI_CALL, PRODUCT
 from app.templates import templates
 
@@ -57,6 +63,44 @@ def invoice_detail(
     return templates.TemplateResponse(
         request, "invoice_detail.html", {"invoice": invoice, "line_items": line_items}
     )
+
+
+@router.post("/invoices/{invoice_id}/issue")
+def invoice_issue_submit(
+    request: Request,
+    invoice_id: UUID,
+    customer_email: EmailStr = Form(...),
+    session: Session = Depends(get_session),
+    storage_client: ObjectStorageClient = Depends(get_storage_client),
+    email_client: EmailClient = Depends(get_email_client),
+):
+    invoice = session.get(Invoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404)
+
+    def _render_error(message: str, status_code: int):
+        line_items = session.scalars(
+            select(InvoiceLineItem).where(InvoiceLineItem.invoice_id == invoice_id)
+        ).all()
+        return templates.TemplateResponse(
+            request,
+            "invoice_detail.html",
+            {"invoice": invoice, "line_items": line_items, "issue_error": message},
+            status_code=status_code,
+        )
+
+    try:
+        issue_invoice(
+            session, invoice, invoice.customer, str(customer_email), storage_client, email_client
+        )
+    except InvalidStatusTransitionError as e:
+        return _render_error(str(e), 409)
+    except Exception:
+        session.rollback()
+        return _render_error("failed to send invoice email", 502)
+
+    session.commit()
+    return RedirectResponse(url=f"/dashboard/invoices/{invoice.id}", status_code=303)
 
 
 @router.get("/usage-events")

@@ -23,19 +23,20 @@ def render_invoice_pdf(invoice: Invoice, line_items: list[InvoiceLineItem]) -> b
     return HTML(string=html).write_pdf()
 
 
-def generate_and_store_pdf(
+def store_pdf(
     invoice: Invoice,
-    line_items: list[InvoiceLineItem],
+    pdf_bytes: bytes,
     storage_client: ObjectStorageClient,
 ) -> None:
-    """Renders the PDF and uploads it to R2, setting invoice.pdf_object_key on
-    success (ADR 0015). Deliberately catches any upload failure rather than
+    """Uploads already-rendered PDF bytes to R2, setting invoice.pdf_object_key
+    on success (ADR 0015). Deliberately catches any upload failure rather than
     letting it propagate: the invoice's issued status must not depend on a
     downstream storage call succeeding — a null pdf_object_key on an issued
     invoice is a legitimate, checkable state, logged here and left for the
     caller to commit regardless. Does not commit — matches
-    transition_status's and get_or_create_checkout_session's convention."""
-    pdf_bytes = render_invoice_pdf(invoice, line_items)
+    transition_status's and get_or_create_checkout_session's convention.
+    Takes pdf_bytes rather than rendering itself so the same bytes can also be
+    used for the invoice email attachment (ADR 0016) without rendering twice."""
     key = f"invoices/{invoice.id}.pdf"
     try:
         storage_client.upload(key, pdf_bytes, content_type="application/pdf")

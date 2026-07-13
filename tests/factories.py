@@ -9,3 +9,4 @@ class CustomerFactory(factory.alchemy.SQLAlchemyModelFactory):
         sqlalchemy_session_persistence = "flush"
 
     name = factory.Faker("company")
+    email = factory.Faker("email")

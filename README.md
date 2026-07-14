@@ -1,6 +1,8 @@
-# Ledger-L5
+<p align="center">
+<img src="docs/assets/Ledger-L5-logo.png" alt="Ledger-L5" width="200">
+</p>
 
-Ledger-L5 is a **billing and usage-metering service** for Sentinel-L7. It pulls usage events on a schedule, tracks per-customer entitlements, issues invoices, and now has a small operator dashboard for looking at all of that.
+**Ledger-L5** is a **billing and usage-metering service** for Sentinel-L7. It pulls usage events on a schedule, tracks per-customer entitlements, issues invoices, and now has a small operator dashboard for looking at all of that.
 
 Architecturally, this project is being built ADR-first: each build phase produces a committed Architecture Decision Record before any code that implements it. See [Roadmap](#️-roadmap) below for the phase order.
 

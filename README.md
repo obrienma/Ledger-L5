@@ -28,7 +28,7 @@ flowchart LR
 - [🚀 Running the Project](#-running-the-project)
 - [🏗️ Architecture](#-architecture)
   - [🔀 Pipeline Diagram](#-pipeline-diagram)
-  - [🗂️ Operational Planes](#️-operational-planes)
+  - [🗂️ Domains](#️-domains)
   - [📐 Scale Design](#-scale-design)
   - [🧩 Python Patterns](#-python-patterns)
 - [📚 Docs](#-docs)
@@ -217,7 +217,7 @@ Deeper behavioral detail per domain — the `usage_events`/customer-linkage gap,
 | File | Contents |
 | --- | --- |
 | [README.md](README.md) | Project overview |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Operational planes (expanded), pipeline diagram, state machines, failure-handling matrix — system-behavior detail that doesn't belong in README |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Domains (expanded), pipeline diagram, state machines, failure-handling matrix — system-behavior detail that doesn't belong in README |
 | [USER_STORIES.md](docs/USER_STORIES.md) | User stories by domain — implemented, aspirational, and deliberately deferred |
 | [adr/](docs/adr/) | Architecture Decision Records |
 | [journal/](docs/journal/) | Engineering journal — one entry per phase |

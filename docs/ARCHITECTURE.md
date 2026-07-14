@@ -1,12 +1,12 @@
 # Architecture
 
-System-behavior detail for Ledger-L5 that doesn't belong in [README.md](../README.md) — the README's [Pipeline Diagram](../README.md#-pipeline-diagram) and [Operational Planes](../README.md#️-operational-planes) table are the entry point; this document is where each plane's real behavior, the data model's open gaps, the state machines, and the failure-handling posture live instead of being restated across six paragraphs of prose.
+System-behavior detail for Ledger-L5 that doesn't belong in [README.md](../README.md) — the README's [Pipeline Diagram](../README.md#-pipeline-diagram) and [Domains](../README.md#️-domains) table are the entry point; this document is where each domain's real behavior, the data model's open gaps, the state machines, and the failure-handling posture live instead of being restated across six paragraphs of prose.
 
 Decisions and their rationale live in [docs/adr/](adr/), not here — this document describes *what the system currently does*, cross-referencing the ADR that decided it rather than re-arguing it.
 
 ---
 
-## Operational Planes (expanded)
+## Domains (expanded)
 
 ### 📥 Ingestion
 

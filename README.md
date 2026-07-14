@@ -4,7 +4,21 @@
 
 **Ledger-L5** is a **billing and usage-metering service** for Sentinel-L7. It pulls usage events on a schedule, tracks per-customer entitlements, issues invoices, and now has a small operator dashboard for looking at all of that.
 
-Architecturally, this project is being built ADR-first: each build phase produces a committed Architecture Decision Record before any code that implements it. See [Roadmap](#️-roadmap) below for the phase order.
+Architecturally, this project is a **scheduled pull-based metering pipeline**: a single service polls an upstream usage source on an interval, rates and invoices that usage through an internally-owned billing engine, and hands collection/delivery off to external providers (Stripe, R2, Resend) that are never trusted with domain authority.
+
+---
+
+```mermaid
+%%{init: {'themeVariables': {'fontSize': '10px'}, 'flowchart': {'nodeSpacing': 15, 'rankSpacing': 25}}}%%
+flowchart LR
+    A[Sentinel-L7] -->|poll usage| B[Ledger-L5]
+    B <--> C[(Postgres)]
+    B --> D[Stripe Checkout]
+    B --> E[R2 + Resend]
+    D --> F[Customer]
+    E --> F
+    B --> G[Operator Dashboard]
+```
 
 ---
 
@@ -13,28 +27,45 @@ Architecturally, this project is being built ADR-first: each build phase produce
 - [🧰 Stack](#-stack)
 - [🚀 Running the Project](#-running-the-project)
 - [🏗️ Architecture](#-architecture)
+  - [🔀 Pipeline Diagram](#-pipeline-diagram)
+  - [🗂️ Operational Planes](#️-operational-planes)
+  - [📐 Scale Design](#-scale-design)
+  - [🧩 Python Patterns](#-python-patterns)
 - [📚 Docs](#-docs)
 - [🗺️ Roadmap](#️-roadmap)
   - [📋 Planned](#-planned)
   - [🐛 Known issues](#-known-issues)
+  - [📦 Production-Ready Baseline](#-production-ready-baseline)
 
 ## 🧰 Stack
 
-- **Python 3.12**
-- **FastAPI** — HTTP layer
-- **Pydantic v2** — request/response schema validation
-- **uv** — dependency management and virtual environments
-- **Postgres on [Neon](https://neon.tech)** — sole data store; `main` branch for dev, `test` branch for the pytest suite
-- **SQLAlchemy 2.0** (sync, `psycopg` v3 driver) + **Alembic** — models and migrations
-- **pytest** + **factory_boy** — test stack, run against real Postgres (not SQLite) — see [ADR 0011](docs/adr/0011-test-stack.md)
-- **httpx** — Sentinel-L7 usage-pull client ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md))
-- **APScheduler** (in-process `BackgroundScheduler`) — real scheduling for the poller and monthly invoice generation ([ADR 0010](docs/adr/0010-scheduling.md))
-- **Jinja2** (FastAPI's built-in `Jinja2Templates`) + **HTMX** (CDN, loaded but not yet used) — server-rendered operator dashboard, no SPA/JS build ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
-- **`stripe`** (official Python SDK) — test-mode-only Checkout Sessions and webhook signature verification for payment collection ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
-- **WeasyPrint** — renders `invoice_pdf.html` to PDF bytes ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md)); deployed on Railway via a root `railpack.json` (`deploy.aptPackages`) rather than a `nixpacks.toml` — Railway's current default builder is Railpack, not classic Nixpacks
-- **`boto3`** — S3-compatible client pointed at Cloudflare R2 for durable invoice PDF storage ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md))
-- **Resend** (via `httpx`, no SDK dependency) — emails the rendered invoice PDF to the customer as an attachment when an invoice is issued ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
-- Money columns (`unit_rate`, `line_total`) are `NUMERIC`/`Decimal`, never `float` — avoids floating-point imprecision in billing math
+The Ledger-L5 engine is a single Python service, grouped below by operational domain.
+
+**🧱 Core Engine & API**
+
+- **Python 3.12 + uv:** dependency management and virtual environments, chosen for fast, reproducible installs.
+- **FastAPI:** the HTTP layer for both the JSON API and the operator dashboard's routing.
+- **Pydantic v2:** request/response schema validation.
+- **Jinja2** (FastAPI's built-in `Jinja2Templates`) **+ HTMX** (CDN, loaded but not yet used): server-rendered operator dashboard, no SPA/JS build ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md)).
+
+**🗄️ Data & Domain Integrity**
+
+- **Postgres on [Neon](https://neon.tech):** sole data store; `main` branch for dev, `test` branch for the pytest suite.
+- **SQLAlchemy 2.0** (sync, `psycopg` v3 driver) **+ Alembic:** fully-typed models and migrations.
+- **pytest + factory_boy:** test stack, run against real Postgres, never SQLite — [ADR 0011](docs/adr/0011-test-stack.md).
+- **`Decimal`/`NUMERIC` everywhere money is stored:** never `float`, to avoid floating-point imprecision in billing math.
+
+**🔗 Ingestion & Scheduling**
+
+- **httpx:** the Sentinel-L7 usage-pull client ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md)).
+- **APScheduler** (in-process `BackgroundScheduler`): real scheduling for the poller and monthly invoice generation ([ADR 0010](docs/adr/0010-scheduling.md)).
+
+**💳 Payments, PDF & Delivery**
+
+- **`stripe`** (official Python SDK): test-mode-only Checkout Sessions and webhook signature verification for payment collection ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md)).
+- **WeasyPrint:** renders `invoice_pdf.html` to PDF bytes ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md)); deployed on Railway via a root `railpack.json` (`deploy.aptPackages`), since Railway's current default builder (Railpack) needs the libraries in the final runtime image.
+- **`boto3`:** S3-compatible client pointed at Cloudflare R2 for durable invoice PDF storage ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md)).
+- **Resend** (via `httpx`, no SDK dependency): emails the rendered invoice PDF to the customer as an attachment when an invoice is issued ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md)).
 
 See [ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md) for why this stack was chosen over the `ledger-l5-rails` prior art.
 
@@ -85,19 +116,7 @@ uv run python -m scripts.seed_rate_card
 
 ## 🏗️ Architecture
 
-`customers` (UUID PK, no tenant isolation — [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md)) and `usage_events` (pulled from Sentinel-L7, classified per its ADR-0028 at pull time — [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md)) exist so far. Note `usage_events` has no `customer_id`: Sentinel-L7 has no customer/tenant model to pull one from (its own ADR-0020) — an open gap Phase 4 will have to resolve. The poll cursor is two independent integers (`since_transactions`, `since_compliance_events`), not a timestamp — [ADR 0003](docs/adr/0003-pull-not-push.md) — per Sentinel-L7's own companion ADR-0029 for the actual endpoint contract; not yet exercised against a live Sentinel-L7. `GET /entitlements/{customer_id}` ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md)) is live but stubbed — always `throttled: false` until the billing engine's real throttle rules are wired in (not yet — only rating/invoicing exist so far). `rate_cards` (customer-specific overrides a nullable-customer_id product default), `invoices`, and `invoice_line_items` exist per [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md)/[ADR 0009](docs/adr/0009-immutable-historical-invoices.md) — line items snapshot their rate at issue time, so editing `rate_cards` afterward never changes an issued invoice. Note invoice generation bills *all* billable usage for a product/metric/period to whichever customer is invoiced, unscoped by customer — `usage_events` still has no `customer_id` (Sentinel-L7 has no tenant model), correct only while there's one implicit customer. That's why the automatic invoice job (below) bills exactly one designated customer rather than looping every row in `customers` — see [ADR 0010](docs/adr/0010-scheduling.md).
-
-The poller and invoice generation are wired to an in-process scheduler ([ADR 0010](docs/adr/0010-scheduling.md)) — the poller runs every `POLL_INTERVAL_SECONDS` (default 60), and a monthly job bills the customer named by `BILLING_CUSTOMER_ID` for the previous calendar month (a no-op, logged as an error, until that setting is configured). `POST /invoices` generates a draft invoice on demand for any customer and any `period_start`/`period_end` — the way to bill someone other than the designated customer, or smoke-test a specific historical range.
-
-Operator auth and a dashboard exist as of Phase 6 ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md)): a static bearer token (`OPERATOR_API_TOKEN`), checked directly via `Authorization: Bearer <token>` on `POST /invoices`, or via a signed session cookie (set by `/login`) on the server-rendered `/dashboard/*` pages (invoice list/detail, usage events, a manual generate-invoice form — same `create_draft_invoice` code path `POST /invoices` uses, not a second one). `GET /entitlements/{customer_id}` is the one deliberate exception, left unauthenticated on purpose — it's Sentinel-L7 polling machine-to-machine, a different consumer with a different (fail-open) contract, ADR 0004.
-
-Stripe payment collection exists as of Phase 7 ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md)): `POST /invoices/{id}/checkout` (behind the same `require_operator_json` as `POST /invoices`) creates a test-mode Stripe Checkout Session for an `issued` invoice's total, idempotently — a repeat call reuses the existing session's URL as long as it's still `open`, only minting a new one if none exists yet or the prior one expired. `POST /webhooks/stripe` is the one route with no operator-token auth at all — it verifies the `Stripe-Signature` header over the raw request body instead, resolves the invoice via Stripe's own echoed-back `metadata.invoice_id` (never the mutable `stripe_checkout_session_id` column), and moves `issued → paid` on `checkout.session.completed`. A `stripe_events` table records processed event IDs so a retried webhook delivery is a no-op, not a second state transition. Stripe never meters usage or finalizes an invoice — both stay entirely internal; it is only ever told a final number and asked to collect it.
-
-PDF invoice generation exists as of Phase 8 ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md)): `app/services/invoice_pdf.py`'s `render_invoice_pdf(invoice, line_items)` is a pure rendering function — no DB session, no storage — that renders the standalone `app/templates/invoice_pdf.html` template (a separate template from the dashboard's `invoice_detail.html`, deliberately not sharing HTMX/nav chrome) via WeasyPrint into PDF bytes. WeasyPrint's Pango/HarfBuzz system-library dependency is satisfied on Railway via a root `railpack.json` (`deploy.aptPackages`), since Railway's current builder (Railpack) needs the libraries in the final runtime image, not just the build step.
-
-Invoice PDF storage exists as of Phase 9 ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md)): `POST /invoices/{id}/issue` (behind the same `require_operator_json` as `POST /invoices`) is the one route in the system that calls `transition_status(invoice, "issued")` — no route did before this phase, since Phases 6/7's dashboard and `/checkout` only ever operated on already-issued invoices by some unspecified means. In the same request, `app/services/invoice_pdf.py`'s `store_pdf` uploads the rendered PDF to Cloudflare R2 (`app/integrations/object_storage.py`, an S3-API-compatible `boto3` client pointed at R2's endpoint, same shape as `stripe.py`/`sentinel_l7.py`) under the deterministic key `invoices/{invoice_id}.pdf`, stored on `invoices.pdf_object_key` once upload succeeds. An R2 upload failure is caught and logged, not raised — the invoice still transitions to `issued` either way (ADR 0009's financial-authority boundary takes precedence over a downstream storage call), leaving `pdf_object_key` null, a legitimate degraded state. `GET /invoices/{id}/pdf` (same auth) streams the object back through this system's own auth rather than a public or presigned R2 URL, 404ing if no PDF has been generated yet. Phase 8's temporary `POST /invoices/{id}/pdf/preview` route is retired now that a permanent, persisted path exists.
-
-Automatic invoice email delivery exists as of Phase 10 ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md)): `app/services/invoice_issuance.py`'s `issue_invoice` orchestrates all three of `POST /invoices/{id}/issue`'s side effects in one request/commit — `transition_status`, PDF render + R2 upload (unchanged from Phase 9, still degrades on failure), then emailing the same in-memory PDF bytes (not the R2 copy) to the customer via Resend (`app/integrations/email.py`, an `EmailClient` Protocol wrapping Resend's REST API directly over `httpx`, same shape as `StripeClient`/`R2Client`). Unlike the R2 upload, **a failed send blocks the whole transition** — the route/dashboard-form handler catches the exception, calls `session.rollback()`, and returns an error rather than committing a half-true `issued` state, since this system's own user stories document `issued` as meaning "the customer has been notified." On success, `invoices.sent_at`/`sent_to_email` record an immutable snapshot of when and where it was sent — not a live read of `customers.email`, which is now an editable field. The recipient address comes from an optional `customer_email` override in the JSON API's request body, or the operator dashboard's issue form (pre-filled from `customer.email`, editable inline); either path persists an edited address back onto the `Customer` row — the only code path in the app that mutates a customer. A customer with no email at all (and no override supplied) 422s before anything is transitioned.
+### 🔀 Pipeline Diagram
 
 ```mermaid
 flowchart LR
@@ -152,15 +171,53 @@ flowchart LR
     WP --> RS
     RS -->|blocks issue on failure| D
     R2 --> DL
+
+    click A "https://github.com/obrienma/Ledger-L5/tree/master/app/services/usage_poller.py" "usage_poller.py"
+    click E "https://github.com/obrienma/Ledger-L5/tree/master/app/services/billing.py" "billing.py"
+    click H "https://github.com/obrienma/Ledger-L5/tree/master/app/services/payments.py" "payments.py"
+    click I "https://github.com/obrienma/Ledger-L5/tree/master/app/services/invoice_issuance.py" "invoice_issuance.py"
+    click WP "https://github.com/obrienma/Ledger-L5/tree/master/app/services/invoice_pdf.py" "invoice_pdf.py"
+    click Dash "https://github.com/obrienma/Ledger-L5/tree/master/app/web/dashboard.py" "dashboard.py"
+
+    classDef clickable fill:#1d4ed8,stroke:#1e40af,stroke-width:2px,color:#ffffff
+    class A,E,H,I,WP,Dash clickable
 ```
 
-Domain code is organized by phase — usage ingestion (Phase 2), entitlements (Phase 3), billing engine (Phase 4), scheduling (Phase 5), operator auth and dashboard (Phase 6), Stripe payment collection (Phase 7), PDF invoice generation (Phase 8), R2 PDF storage (Phase 9), automatic invoice email delivery (Phase 10).
+### 🗂️ Domains
+
+| Domain  | Purpose & Responsibilities | Key Components & Files |
+| :--- | :--- | :--- |
+| **📥 Ingestion** | Pulls usage events from Sentinel-L7 on an interval, classifying them at pull time ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md)). | `services/usage_poller.py`, `services/usage_ingestion.py`, `integrations/sentinel_l7.py` |
+| **💰 Billing Engine** | Rates usage against rate cards and generates draft invoices; owns `transition_status()`, the one sanctioned way an invoice's state changes ([ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md), [ADR 0009](docs/adr/0009-immutable-historical-invoices.md)). | `services/billing.py`, `models/rate_card.py`, `models/invoice.py`, `models/invoice_line_item.py` |
+| **🔌 Entitlements & Invoice API** | HTTP surface for Sentinel-L7's entitlement polling and operator/manual invoice generation ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md)). | `api/entitlements.py`, `api/invoices.py` |
+| **💳 Payments** | Stripe Checkout session creation and signature-verified webhook handling; drives the `issued → paid` transition ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md)). | `services/payments.py`, `api/webhooks.py`, `integrations/stripe.py`, `models/stripe_event.py` |
+| **📨 Delivery** | Orchestrates the `issue` transition: PDF render, R2 upload (degrades on failure), Resend email (blocks on failure) ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md)–[ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md)). | `services/invoice_issuance.py`, `services/invoice_pdf.py`, `integrations/object_storage.py`, `integrations/email.py` |
+| **🖥️ Operator Dashboard** | Bearer-token/session auth and a server-rendered Jinja2 UI for invoices, usage events, and manual invoice generation ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md)). | `web/auth.py`, `web/dashboard.py`, `app/auth.py`, `templates/*.html` |
+
+Deeper behavioral detail per domain — the `usage_events`/customer-linkage gap, Stripe's idempotent-reuse logic, the R2-degrades-vs-Resend-blocks asymmetry, and more — lives in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), not here.
+
+### 📐 Scale Design
+
+> [!NOTE]
+> Ledger-L5 runs as a **single writer** — one instance with an in-process APScheduler, not a Competing-Consumers queue architecture. A second replica would double-run the poller and the monthly billing job today; see the Roadmap's duplicate-invoice-guard item before that changes ([ADR 0010](docs/adr/0010-scheduling.md)).
+
+### 🧩 Python Patterns
+
+* Protocol-based client interfaces, not ABCs — `EmailClient`, `ObjectStorageClient`, `UsagePullClient`, `CheckoutClient` in `app/integrations/`; zero `ABC`/`abstractmethod` anywhere in `app/`.
+* Fail-fast settings — required env vars in `app/config.py` are bare annotations with no default; `settings = Settings()` at import time crashes on startup, not on first request.
+* `Decimal`/`NUMERIC` for all money, never `float` — one `_to_cents` conversion boundary in `integrations/stripe.py`, where cents-as-int is unavoidable.
+* Fully-typed SQLAlchemy 2.0 ORM — `Mapped[...]`/`mapped_column` throughout, no legacy `Column()` style.
+* DI via FastAPI `Depends()`, not a mocking library — `get_session`, `get_stripe_client`, `get_storage_client`, `get_email_client` swapped per-test with `app.dependency_overrides[...]`.
+* Tests run on real Postgres, not SQLite — the `db_session` fixture uses `join_transaction_mode="create_savepoint"` so route-level commits land on a nested SAVEPOINT the outer test transaction discards.
+* One sanctioned mutation point per aggregate — `transition_status()` is the only place an invoice's status/financial fields change, gated by a linear `VALID_TRANSITIONS` state machine.
+* factory_boy for model construction in tests — e.g. `CustomerFactory`, not dict fixtures.
 
 ## 📚 Docs
 
 | File | Contents |
 | --- | --- |
 | [README.md](README.md) | Project overview |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Operational planes (expanded), pipeline diagram, state machines, failure-handling matrix — system-behavior detail that doesn't belong in README |
 | [USER_STORIES.md](docs/USER_STORIES.md) | User stories by domain — implemented, aspirational, and deliberately deferred |
 | [adr/](docs/adr/) | Architecture Decision Records |
 | [journal/](docs/journal/) | Engineering journal — one entry per phase |
@@ -168,50 +225,57 @@ Domain code is organized by phase — usage ingestion (Phase 2), entitlements (P
 
 ## 🗺️ Roadmap
 
+This project is built ADR-first: each build phase produces a committed Architecture Decision Record before any code that implements it — see [docs/adr/](docs/adr/).
+
 ### 📋 Planned
 
-- [x] **Phase 0 — Repo scaffold:** `uv`-managed FastAPI + Pydantic v2 skeleton, `docs/adr/` established. ([ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md))
-- [x] **Phase 1 — Foundations:** pytest + factory_boy test stack against real Postgres (Neon branches), UUID primary keys, `customers` table, no multi-tenancy. ([ADR 0002](docs/adr/0002-uuid-primary-keys.md), [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md), [ADR 0011](docs/adr/0011-test-stack.md))
-- [x] **Phase 2 — Usage ingestion:** pull contract with Sentinel-L7, `usage_events` table, ADR-0028 billing classification at pull time. ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md), [ADR 0006](docs/adr/0006-single-hardcoded-product-no-plugin-system.md))
-- [x] **Phase 3 — Entitlement/throttle poll endpoint:** `GET /entitlements/:customer_id`, stubbed throttled:false, caller-side fail-open documented. ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md))
-- [x] **Phase 4 — Billing engine:** rate cards, override precedence, append-only invoices — rate snapshotted onto line items at issue time. ([ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md), [ADR 0009](docs/adr/0009-immutable-historical-invoices.md))
-- [x] **Phase 5 — Scheduling:** in-process scheduler polls on an interval and bills one designated customer monthly; `POST /invoices` covers any customer/custom range on demand; minimal Railway `Procfile` added. ([ADR 0010](docs/adr/0010-scheduling.md))
-- [x] **Phase 6 — Operator auth and dashboard:** static bearer-token auth (also now required on `POST /invoices`); server-rendered Jinja2 dashboard for invoices, usage events, and manual invoice generation. ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
-- [x] **Phase 7 — Stripe payment collection:** `POST /invoices/{id}/checkout` creates a test-mode Stripe Checkout Session for an issued invoice (idempotent per invoice); `POST /webhooks/stripe` verifies signatures and moves `issued → paid` on `checkout.session.completed`, resolved via Stripe session metadata, not the mutable session-ID column. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
-- [x] **Phase 8 — PDF invoice generation:** WeasyPrint renders a dedicated `invoice_pdf.html` template to PDF bytes via `app/services/invoice_pdf.py`; exercised through a temporary, operator-authenticated preview route (`POST /invoices/{id}/pdf/preview`, not persisted, not yet wired to `transition_status`) that validates the template and the Railway/Railpack `deploy.aptPackages` build path end to end — verified against a live Railpack-format `railpack.json` and a real WeasyPrint render, not just unit tests. Permanent wiring into the `issued` transition is deferred to Phase 9, once storage exists. ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md) — Accepted)
-- [x] **Phase 9 — Invoice PDF storage (Cloudflare R2):** `POST /invoices/{id}/issue` (new — no route called `transition_status(invoice, "issued")` before this phase) transitions a draft invoice, renders its PDF, and uploads it to R2 (`invoices/{invoice_id}.pdf`, key stored on `invoices.pdf_object_key`) in one request; upload failure is logged but never fails the transition. Retrieved via `GET /invoices/{id}/pdf`, streamed under the same operator auth as `POST /invoices`; Phase 8's preview route is retired. Verified against a live R2 bucket, not just unit tests — issued a real invoice, confirmed the object via a raw `boto3` list call against the bucket, and downloaded it back through the route. ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md) — Accepted)
-- [x] **Phase 10 — Automatic invoice email delivery:** `app/services/invoice_issuance.py` gives `POST /invoices/{id}/issue` a third side effect — emailing the rendered PDF bytes (not the R2 copy) to the customer via Resend (`app/integrations/email.py`) as an attachment, recording `invoices.sent_at`/`sent_to_email` on success. Unlike R2 upload, a failed send blocks the entire transition and rolls it back (the route/dashboard handler catches the exception and calls `session.rollback()`) — `issued` is documented to mean "the customer has been notified," so send success joins `transition_status` as part of the financial-authority boundary rather than a degrading downstream call. The dashboard's issue form (`app/templates/invoice_detail.html`) lets an operator edit `customer.email` inline, pre-filled from the customer record; the JSON API accepts the same override via an optional `customer_email` body field. Either path persists the edited address to `customers.email` — the first code path in the app that mutates a customer row. A customer with no email at all (and no override) 422s before any side effect runs. ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md) — Accepted)
+- [ ] **Scope invoice generation to a specific customer** once Sentinel-L7 usage events carry a `customer_id` — `create_draft_invoice` currently bills all billable usage for a product/metric/period to whichever single customer it's given, correct only while exactly one customer exists. ([ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md), [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md))
+- [ ] **Verify the Sentinel-L7 usage-pull contract against a live endpoint** once Sentinel-L7's own ADR-0029 is Accepted — Phase 2 is built and tested entirely against fixtures matching the documented `GET /usage` shape today. ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md))
+- [ ] **Design and wire real entitlement-throttle rules** — `GET /entitlements/:customer_id` always returns `throttled: false` today; real rules are downstream of the rate-card work. ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md))
+- [ ] **Add a dashboard "Pay" button and email the Stripe Checkout link automatically** — a payer currently has to be sent the link manually. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- [ ] **Enforce invoice immutability at the database layer** (a trigger or `REVOKE UPDATE`), not just by omission in the service layer — nothing today stops a direct SQL client or future admin tool from mutating a line item or issued invoice's financial fields. ([ADR 0009](docs/adr/0009-immutable-historical-invoices.md))
+- [ ] **Add a duplicate-invoice guard** before generating a new invoice for the same customer/product/metric/period — reachable today from a manual re-run alone, not only from a future multi-replica deploy. ([ADR 0010](docs/adr/0010-scheduling.md))
+- [ ] **Decide the zero-usage invoice policy** — skip vs. issue a $0 invoice for record-keeping; a zero-usage period currently always produces a draft invoice with zero line items. ([ADR 0010](docs/adr/0010-scheduling.md))
+- [ ] **Add a manual PDF regenerate/retry action** for an issued invoice whose `pdf_object_key` is still null after a failed R2 upload. ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md))
+- [ ] **Add a resend action** for an already-issued invoice's email — today the only way to "retry" a notification is to re-run `issue` from a `draft` invoice, which doesn't help once an invoice is already issued. ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
 
 ### 🐛 Known issues
 
-Each item below is a deliberate scope boundary from the ADR that set it, not an oversight — read as "true today, revisit when," not "broken."
+Each item below is a deliberate, currently-correct design boundary, not a bug — read as "true today, stays this way unless its trigger condition occurs," not "broken."
 
-#### Single-customer scope (by design — no second customer exists yet)
-- **Invoice generation is unscoped by customer.** `usage_events` has no `customer_id`; `create_draft_invoice` bills all billable usage for a product/metric/period to whichever single customer it's given. Correct today because exactly one customer exists. **Revisit when:** Sentinel-L7 (or any product) can distinguish usage by customer — this aggregation logic changes at that point, not before. ([ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md), [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md))
+- **`GET /entitlements/{customer_id}` has no auth**, unlike every other route since Phase 6 added bearer-token auth to `POST /invoices` and the whole `/dashboard/*` surface. It's Sentinel-L7 polling machine-to-machine, and ADR 0004's fail-open contract for that consumer is a different, still-valid design, not an oversight. No access control on the `customers` table directly either, beyond what the routes above enforce. **Stays this way unless:** this endpoint's consumer changes from "Sentinel-L7 only, trusted network" to something else. ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md), [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md))
+- **No dedicated handling for an abandoned Stripe Checkout session.** Stripe pushes an `expired` event, not a distinct "canceled" one, when a payer closes the tab without paying — the idempotent-reuse behavior in `POST /invoices/{id}/checkout` means a payer who comes back later just resumes (or regenerates, once expired) the same flow, left to Stripe's own session lifecycle rather than distinguished server-side. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- **Stripe is test-mode only.** Switching to a live account (real API keys) is the concrete trigger for revisiting this ADR — nothing about the architecture changes, only the fact that a real charge becomes possible. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+- **A Resend outage or misconfiguration blocks invoicing entirely**, not just email delivery — a strictly larger blast radius than R2's degrade-on-failure handling, accepted deliberately because "the customer has been notified" is part of what `issued` means. ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
+- **An email failure after a successful R2 upload leaves an orphaned object in the bucket** — the upload isn't rolled back, only the DB transaction is. Harmless. ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
 
-#### Blocked on a cross-repo dependency, not a Ledger-L5 gap
-- **The Sentinel-L7 usage-pull contract has never run against a live Sentinel-L7.** Phase 2 is built and tested entirely against fixtures matching the documented `GET /usage` shape. **Revisit when:** Sentinel-L7's own ADR-0029 is Accepted and the endpoint is live — this is an explicit, named blocking dependency, not something Ledger-L5 can close unilaterally. ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md))
+### 📦 Production-Ready Baseline
 
-#### Deliberately unauthenticated (one endpoint, one specific reason)
-- **`GET /entitlements/{customer_id}` has no auth.** Phase 6 ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md)) added bearer-token auth to `POST /invoices` and the whole `/dashboard/*` surface, but left this one endpoint open — it's Sentinel-L7 polling machine-to-machine, and ADR 0004's fail-open contract for that consumer is a different, still-valid design, not an oversight. No access control on the `customers` table directly either, beyond what the routes above enforce. **Revisit when:** this endpoint's consumer changes from "Sentinel-L7 only, trusted network" to something else. ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md), [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md))
+> [!TIP]
+> **11 phases shipped (0–10)** | **66 tests passing**
 
-#### Stubbed pending a real rules decision
-- **Entitlement throttling is entirely stubbed.** `GET /entitlements/{customer_id}` always returns `throttled: false`. Fail-open on unreachable/stale response is a documented expectation for callers, not enforced logic yet. **Revisit when:** real throttle rules are defined, downstream of the rate-card work in [ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md) — not tied to a specific phase number ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md) originally named Phase 4 as the trigger; Phase 4 shipped without wiring this, so that phase-based framing was corrected in the ADR itself rather than repeated here).
+<details>
+<summary>🔍 View shipped features...</summary>
 
-#### Stripe payment collection (ADR 0013 — deliberate scope boundaries)
-- **No dedicated handling for an abandoned Checkout session.** Stripe pushes an `expired` event, not a distinct "canceled" one, when a payer closes the tab without paying. Not solved here: the idempotent-reuse behavior in `POST /invoices/{id}/checkout` means a payer who comes back later just resumes (or regenerates, once expired) the same flow. **Revisit if:** a real reason emerges to distinguish "abandoned" from "in progress" server-side rather than leaving it to Stripe's own session lifecycle. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
-- **No dashboard "Pay" button and no email delivery of the Checkout link yet.** Both are explicitly out of scope for this phase — a future "Pay" button would call `get_or_create_checkout_session` directly, the same way the existing generate-invoice dashboard form calls `create_draft_invoice` directly (Phase 6's established pattern), not a second HTTP call to `POST /invoices/{id}/checkout`. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
-- **Test mode only.** Switching to a live Stripe account (real API keys) is the concrete trigger for revisiting this ADR — nothing about the architecture changes, only the fact that a real charge becomes possible. ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+#### 🧱 Foundations & Usage Ingestion
+* Repo scaffold — `uv`-managed FastAPI + Pydantic v2 skeleton, `docs/adr/` established ([ADR 0001](docs/adr/0001-build-ledger-l5-in-python-fastapi.md))
+* pytest + factory_boy test stack against real Postgres (Neon branches), UUID primary keys, `customers` table, no multi-tenancy ([ADR 0002](docs/adr/0002-uuid-primary-keys.md), [ADR 0007](docs/adr/0007-customer-model-no-multi-tenancy.md), [ADR 0011](docs/adr/0011-test-stack.md))
+* Usage ingestion — pull contract with Sentinel-L7, `usage_events` table, ADR-0028 billing classification at pull time ([ADR 0003](docs/adr/0003-pull-not-push.md), [ADR 0005](docs/adr/0005-sentinel-l7-usage-pull-contract.md), [ADR 0006](docs/adr/0006-single-hardcoded-product-no-plugin-system.md))
 
-#### Billing-correctness hardening (app-layer today, needs a second layer before scale)
-- **Invoice immutability is enforced by omission, not the database.** No service function mutates a line item or issued invoice's financial fields — but nothing at the DB level (trigger, `REVOKE UPDATE`) stops a direct SQL client or future admin tool from doing so. **Revisit when:** any tooling gets direct DB access beyond this service's own code path — the app-layer guarantee stops being sufficient at that point. ([ADR 0009](docs/adr/0009-immutable-historical-invoices.md))
-- **No duplicate-invoice guard.** Neither the monthly scheduled job nor `POST /invoices` checks for an existing invoice covering the same customer/product/metric/period before calling `create_draft_invoice`. **Revisit when:** a multi-replica deploy becomes real, or a manual/dashboard-driven re-run actually creates a duplicate — whichever happens first; this is reachable today from a manual re-run alone, not only from replica scaling. ([ADR 0010](docs/adr/0010-scheduling.md))
-- **Empty invoices are possible.** A zero-usage period still produces a draft invoice with zero line items. **Revisit when:** the zero-usage policy is actually decided — this is an open business-rule question (skip vs. issue a $0 invoice for record-keeping), not a defect either way. ([ADR 0010](docs/adr/0010-scheduling.md))
+#### 💳 Entitlements & Billing Engine
+* `GET /entitlements/:customer_id` — stubbed `throttled: false`, caller-side fail-open documented ([ADR 0004](docs/adr/0004-entitlement-throttle-poll-endpoint.md))
+* Billing engine — rate cards, override precedence, append-only invoices with rate snapshotted onto line items at issue time ([ADR 0008](docs/adr/0008-configurable-billing-rules-engine.md), [ADR 0009](docs/adr/0009-immutable-historical-invoices.md))
 
-#### Invoice PDF storage (ADR 0015 — deliberate scope boundary)
-- **No retry path for a failed R2 upload.** An issued invoice with `pdf_object_key IS NULL` means the upload failed at issue time; nothing re-attempts it automatically, and there's no manual "regenerate PDF" action either. **Revisit when:** a null `pdf_object_key` on an issued invoice is actually observed outside a test — the ADR names this explicitly as "worth a retry path if this becomes a real problem, not built preemptively." ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md))
+#### ⏱️ Scheduling & Operator Dashboard
+* In-process scheduler — polls on an interval and bills one designated customer monthly; `POST /invoices` covers any customer/custom range on demand; minimal Railway `Procfile` ([ADR 0010](docs/adr/0010-scheduling.md))
+* Operator auth and dashboard — static bearer-token auth (also required on `POST /invoices`); server-rendered Jinja2 dashboard for invoices, usage events, and manual invoice generation ([ADR 0012](docs/adr/0012-operator-auth-and-dashboard.md))
 
-#### Automatic invoice email delivery (ADR 0016 — deliberate scope boundaries)
-- **No resend action.** Given blocking-on-send semantics, the only way to "retry" a notification today is to attempt `issue` again from a `draft` invoice — there's no way to resend an already-issued invoice's email (e.g., a customer says they never got it). **Revisit when:** that's actually asked for, same "wait until it hurts" posture as everywhere else in this repo. ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
-- **A Resend outage or misconfiguration now blocks invoicing entirely**, not just email delivery — a strictly larger blast radius than R2's degrade-on-failure handling, accepted deliberately because "the customer has been notified" is part of what `issued` means. **Revisit if:** a real outage makes this a practical operational problem, not a hypothetical one. ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
-- **An email failure after a successful R2 upload leaves an orphaned object in the bucket** — the upload isn't rolled back, only the DB transaction is. Harmless, matches the "not built preemptively" posture already established for the R2 retry gap above. ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
+#### 💰 Payments (Stripe)
+* Stripe Checkout — `POST /invoices/{id}/checkout` creates a test-mode Checkout Session for an issued invoice, idempotent per invoice; `POST /webhooks/stripe` verifies signatures and moves `issued → paid` on `checkout.session.completed`, resolved via Stripe session metadata rather than the mutable session-ID column ([ADR 0013](docs/adr/0013-stripe-for-payment-collection-only.md))
+
+#### 🧾 Invoice PDF, Storage & Delivery
+* PDF invoice generation — WeasyPrint renders a dedicated `invoice_pdf.html` template via `app/services/invoice_pdf.py`; Railway/Railpack `deploy.aptPackages` build path verified against a live build and a real WeasyPrint render ([ADR 0014](docs/adr/0014-pdf-invoice-generation-weasyprint.md))
+* Invoice PDF storage (Cloudflare R2) — `POST /invoices/{id}/issue` transitions a draft invoice, renders its PDF, and uploads it to R2 (`invoices/{invoice_id}.pdf`) in one request; upload failure is logged but never fails the transition; retrieved via `GET /invoices/{id}/pdf` under the same operator auth; verified against a live R2 bucket ([ADR 0015](docs/adr/0015-cloudflare-r2-invoice-pdf-storage.md))
+* Automatic invoice email delivery — `app/services/invoice_issuance.py` emails the rendered PDF bytes to the customer via Resend as an attachment on issue; unlike the R2 upload, a failed send blocks and rolls back the whole transition, since `issued` is documented to mean "the customer has been notified"; the dashboard's issue form (and the JSON API's optional `customer_email` field) lets an operator edit the customer's email inline, which persists to the `Customer` row ([ADR 0016](docs/adr/0016-automatic-invoice-email-delivery.md))
+
+</details>
